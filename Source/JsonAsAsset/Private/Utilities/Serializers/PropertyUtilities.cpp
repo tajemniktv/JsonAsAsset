@@ -1,0 +1,685 @@
+/* Copyright JsonAsAsset Contributors 2024-2026 */
+
+#include "Utilities/Serializers/PropertyUtilities.h"
+
+#include "GameplayTagContainer.h"
+#include "Importers/Constructor/Importer.h"
+#include "Utilities/Serializers/ObjectUtilities.h"
+#include "UObject/TextProperty.h"
+
+/* Struct Serializers */
+#include "MovieSceneSection.h"
+#include "Engine/FontFace.h"
+#include "Utilities/Serializers/Structs/DateTimeSerializer.h"
+#include "Utilities/Serializers/Structs/FallbackStructSerializer.h"
+#include "Utilities/Serializers/Structs/TimeSpanSerializer.h"
+
+DECLARE_LOG_CATEGORY_CLASS(LogJsonAsAssetPropertySerializer, Error, Log);
+PRAGMA_DISABLE_OPTIMIZATION
+
+UPropertySerializer::UPropertySerializer() {
+	this->FallbackStructSerializer = MakeShared<FFallbackStructSerializer>(this);
+
+	UScriptStruct* DateTimeStruct = FindObject<UScriptStruct>(nullptr, TEXT("/Script/CoreUObject.DateTime"));
+	UScriptStruct* TimespanStruct = FindObject<UScriptStruct>(nullptr, TEXT("/Script/CoreUObject.TimeSpan"));
+	check(DateTimeStruct);
+	check(TimespanStruct);
+
+	this->StructSerializers.Add(DateTimeStruct, MakeShared<FDateTimeSerializer>());
+	this->StructSerializers.Add(TimespanStruct, MakeShared<FTimeSpanSerializer>());
+}
+
+#if UE4_18_BELOW
+void UPropertySerializer::DeserializePropertyValue(UProperty* Property, const TSharedRef<FJsonValue>& JsonValue, void* OutValue) {
+	UMapProperty* MapProperty = Cast<UMapProperty>(Property);
+	USetProperty* SetProperty = Cast<USetProperty>(Property);
+	UArrayProperty* ArrayProperty = Cast<UArrayProperty>(Property);
+#else
+void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TSharedRef<FJsonValue>& JsonValue, void* OutValue) {
+	const FMapProperty* MapProperty = CastField<const FMapProperty>(Property);
+	const FSetProperty* SetProperty = CastField<const FSetProperty>(Property);
+	const FArrayProperty* ArrayProperty = CastField<const FArrayProperty>(Property);
+#endif
+
+	TSharedRef<FJsonValue> NewJsonValue = JsonValue;
+	
+	if (BlacklistedPropertyNames.Contains(Property->GetName())) {
+		return;
+	}
+
+	if (MapProperty) {
+		if (NewJsonValue->IsNull()) {
+			return;
+		}
+		
+#if UE4_18_BELOW
+		UProperty* KeyProperty = MapProperty->KeyProp;
+		UProperty* ValueProperty = MapProperty->ValueProp;
+#else
+		FProperty* KeyProperty = MapProperty->KeyProp;
+		FProperty* ValueProperty = MapProperty->ValueProp;
+#endif
+		FScriptMapHelper MapHelper(MapProperty, OutValue);
+		const TArray<TSharedPtr<FJsonValue>>& PairArray = NewJsonValue->AsArray();
+
+		for (int32 i = 0; i < PairArray.Num(); i++) {
+			const TSharedPtr<FJsonObject>& Pair = PairArray[i]->AsObject();
+			const TSharedPtr<FJsonValue>& EntryKey = Pair->Values.FindChecked(TEXT("Key"));
+			const TSharedPtr<FJsonValue>& EntryValue = Pair->Values.FindChecked(TEXT("Value"));
+			const int32 Index = MapHelper.AddDefaultValue_Invalid_NeedsRehash();
+			uint8* PairPtr = MapHelper.GetPairPtr(Index);
+
+			/* Copy over imported key and value from temporary storage */
+			DeserializePropertyValue(KeyProperty, EntryKey.ToSharedRef(), PairPtr);
+			DeserializePropertyValue(ValueProperty, EntryValue.ToSharedRef(), PairPtr + MapHelper.MapLayout.ValueOffset);
+		}
+		MapHelper.Rehash();
+
+	} else if (SetProperty) {
+#if UE4_18_BELOW
+		UProperty* ElementProperty = SetProperty->ElementProp;
+#else
+		FProperty* ElementProperty = SetProperty->ElementProp;
+#endif
+		FScriptSetHelper SetHelper(SetProperty, OutValue);
+		const TArray<TSharedPtr<FJsonValue>>& SetArray = NewJsonValue->AsArray();
+		SetHelper.EmptyElements();
+		uint8* TempElementStorage = static_cast<uint8*>(FMemory::Malloc(ElementProperty->ElementSize));
+		ElementProperty->InitializeValue(TempElementStorage);
+
+		for (int32 i = 0; i < SetArray.Num(); i++) {
+			const TSharedPtr<FJsonValue>& Element = SetArray[i];
+			DeserializePropertyValue(ElementProperty, Element.ToSharedRef(), TempElementStorage);
+
+			const int32 NewElementIndex = SetHelper.AddDefaultValue_Invalid_NeedsRehash();
+			uint8* NewElementPtr = SetHelper.GetElementPtr(NewElementIndex);
+
+			/* Copy over imported key from temporary storage */
+			ElementProperty->CopyCompleteValue_InContainer(NewElementPtr, TempElementStorage);
+		}
+		SetHelper.Rehash();
+
+		ElementProperty->DestroyValue(TempElementStorage);
+		FMemory::Free(TempElementStorage);
+	} else if (ArrayProperty) {
+#if UE4_18_BELOW
+		UProperty* ElementProperty = ArrayProperty->Inner;
+#else
+		FProperty* ElementProperty = ArrayProperty->Inner;
+#endif
+		FScriptArrayHelper ArrayHelper(ArrayProperty, OutValue);
+		const TArray<TSharedPtr<FJsonValue>>& SetArray = NewJsonValue->AsArray();
+		ArrayHelper.EmptyValues();
+
+		for (int32 i = 0; i < SetArray.Num(); i++) {
+			const TSharedPtr<FJsonValue>& Element = SetArray[i];
+			if (Element.Get()->Type == EJson::Null) {
+				continue;
+			}
+			const uint32 AddedIndex = ArrayHelper.AddValue();
+			uint8* ValuePtr = ArrayHelper.GetRawPtr(AddedIndex);
+			DeserializePropertyValue(ElementProperty, Element.ToSharedRef(), ValuePtr);
+		}
+	}
+#if UE4_18_BELOW
+	else if (Property->IsA<UMulticastDelegateProperty>()) {
+	}
+	else if (Property->IsA<UDelegateProperty>()) {
+	}
+	else if (Cast<UInterfaceProperty>(Property)) {
+}
+	else if (USoftObjectProperty* SoftObjectProperty = Cast<USoftObjectProperty>(Property)) {
+#else
+	else if (Property->IsA<FMulticastDelegateProperty>()) {
+	}
+	else if (Property->IsA<FDelegateProperty>()) {
+	}
+	else if (CastField<const FInterfaceProperty>(Property)) {
+	}
+	else if (FSoftObjectProperty* SoftObjectProperty = CastField<FSoftObjectProperty>(Property)) {
+#endif
+	
+		TSharedPtr<FJsonObject> SoftJsonObjectProperty;
+		FString PathString = "";
+		
+		switch (NewJsonValue->Type) {
+			/* UEParse, extract it from the object */
+			case EJson::Object:
+				SoftJsonObjectProperty = NewJsonValue->AsObject();
+				PathString = SoftJsonObjectProperty->GetStringField(TEXT("AssetPathName"));
+			break;
+
+			/* Older game builds */
+			default:
+				PathString = NewJsonValue->AsString();
+			break;
+		}
+
+		if (PathString != "") {
+			FSoftObjectPtr* ObjectPtr = static_cast<FSoftObjectPtr*>(OutValue);
+			*ObjectPtr = FSoftObjectPath(PathString);
+
+			if (!ObjectPtr->LoadSynchronous()) {
+				/* Try importing it using Cloud */
+				FString PackagePath;
+				FString AssetName;
+				PathString.Split(".", &PackagePath, &AssetName);
+				TObjectPtr<UObject> T;
+
+				FString PropertyClassName = SoftObjectProperty->PropertyClass->GetName();
+				
+				IImporter::DownloadWrapper(T, PropertyClassName, AssetName, PackagePath);
+			}
+		}
+	}
+#if UE4_18_BELOW
+	else if (UObjectPropertyBase* ObjectProperty = Cast<UObjectPropertyBase>(Property)) {
+#else
+	else if (const FObjectPropertyBase* ObjectProperty = CastField<const FObjectPropertyBase>(Property)) {
+#endif
+		/* Need to serialize full UObject for object property */
+		TObjectPtr<UObject> Object = nullptr;
+
+		if (NewJsonValue->IsNull()) {
+			ObjectProperty->SetObjectPropertyValue(OutValue, nullptr);
+		}
+
+		if (NewJsonValue->Type == EJson::Object) {
+			auto JsonValueAsObject = NewJsonValue->AsObject();
+			bool UseDefaultLoadObject = !JsonValueAsObject->GetStringField(TEXT("ObjectName")).Contains(":ParticleModule");
+
+			if (UseDefaultLoadObject) {
+				if (Importer == nullptr) {
+					Importer = new IImporter();
+				}
+				
+				Importer->SetParent(ObjectSerializer->Parent);
+				Importer->LoadExport(&JsonValueAsObject, Object);
+
+				if (Object != nullptr && !Object.Get()->IsA(UActorComponent::StaticClass())) {
+					ObjectProperty->SetObjectPropertyValue(OutValue, Object);
+				}
+
+				if (Object != nullptr) {
+					/* Get the export */
+#if UE4_18_BELOW
+					TSharedPtr<FJsonObject> Export = GetExport(JsonValueAsObject.Get(), ObjectSerializer->Exports);
+					if (Export.IsValid()) {
+#else
+					if (TSharedPtr<FJsonObject> Export = GetExport(JsonValueAsObject.Get(), ObjectSerializer->Exports)) {
+#endif
+						if (Export->HasField(TEXT("Properties")) && ObjectSerializer->Parent != nullptr && Export->GetStringField(TEXT("Outer")) == ObjectSerializer->Parent->GetName()) {
+							TSharedPtr<FJsonObject> Properties = Export->GetObjectField(TEXT("Properties"));
+
+							if (Export->HasField(TEXT("LODData"))) {
+								Properties->SetArrayField(TEXT("LODData"), Export->GetArrayField(TEXT("LODData")));
+							}
+							
+							ObjectSerializer->DeserializeObjectProperties(Properties, Object);
+						}
+					}
+				}
+			}
+
+			FString ObjectName = JsonValueAsObject->GetStringField(TEXT("ObjectName"));
+			FString ObjectPath = JsonValueAsObject->GetStringField(TEXT("ObjectPath"));
+			FString ObjectOuter;
+			int ObjectIndex = -1;
+
+			if (ObjectName.Contains(".")) {
+				ObjectName.Split(".", &ObjectOuter, &ObjectName);
+				ObjectName.Split("'", &ObjectName, nullptr);
+			}
+
+			if (ObjectName.Contains(":")) {
+				ObjectName.Split(":", nullptr, &ObjectName);
+				ObjectName.Split("'", &ObjectName, nullptr);
+			}
+
+			if (ObjectPath.Contains(".")) {
+				FString ObjectIndexString;
+				ObjectPath.Split(".", nullptr, &ObjectIndexString);
+
+				ObjectIndex = FCString::Atoi(*ObjectIndexString);
+			}
+
+#if UE4_18_BELOW
+			FUObjectExport Export = ExportsContainer.Find(ObjectName);
+			if (Export.Object != nullptr) {
+#else
+			if (FUObjectExport Export = ExportsContainer.Find(ObjectName); Export.Object != nullptr) {
+#endif
+				if (UObject* FoundObject = Export.Object) {
+					ObjectProperty->SetObjectPropertyValue(OutValue, FoundObject);
+				}
+			}
+
+			if (ObjectName.Contains(".")) {
+				TArray<FString> Parts;
+				ObjectName.ParseIntoArray(Parts, TEXT("."), true);
+
+				FString Penultimate = Parts.Num() > 1 ? Parts[Parts.Num() - 2] : TEXT("");
+				FString LastSegment = Parts.Num() > 0 ? Parts.Last() : TEXT("");
+
+				ObjectName = LastSegment;
+				ObjectOuter = Penultimate;
+			}
+
+			if (!ObjectOuter.IsEmpty()) {
+				if (ObjectOuter.Contains(":")) {
+					ObjectOuter.Split(":", nullptr, &ObjectOuter);
+				}
+				
+#if UE4_18_BELOW
+				FUObjectExport Export = ExportsContainer.Find(ObjectName, ObjectOuter);
+				if (Export.Object != nullptr) {
+#else
+				if (FUObjectExport Export = ExportsContainer.Find(ObjectName, ObjectOuter); Export.Object != nullptr) {
+#endif
+					if (UObject* FoundObject = Export.Object) {
+						ObjectProperty->SetObjectPropertyValue(OutValue, FoundObject);
+					}
+				}
+			}
+
+			if (FallbackToParentTrace) {
+				if (UObject* Parent = ObjectSerializer->Parent) {
+					FString Name = Parent->GetName();
+					
+#if UE4_18_BELOW
+					FUObjectExport Export = ExportsContainer.Find(ObjectName, Name);
+					if (Export.Object != nullptr) {
+#else
+					if (FUObjectExport Export = ExportsContainer.Find(ObjectName, Name); Export.Object != nullptr) {
+#endif
+						if (UObject* FoundObject = Export.Object) {
+							ObjectProperty->SetObjectPropertyValue(OutValue, FoundObject);
+						}
+					}
+				}
+			}
+
+			if (ObjectIndex != -1) {
+#if UE4_18_BELOW
+				FUObjectExport Export = ExportsContainer.FindByPosition(ObjectIndex);
+				if (Export.Object != nullptr) {
+#else
+				if (FUObjectExport Export = ExportsContainer.FindByPosition(ObjectIndex); Export.Object != nullptr) {
+#endif
+					if (UObject* FoundObject = Export.Object) {
+						ObjectProperty->SetObjectPropertyValue(OutValue, FoundObject);
+					}
+				}
+			}
+		}
+	}
+#if UE4_18_BELOW
+	else if (UStructProperty* StructProperty = Cast<UStructProperty>(Property)) {
+#else
+	else if (const FStructProperty* StructProperty = CastField<const FStructProperty>(Property)) {
+#endif
+		if (StructProperty->Struct == FGameplayTag::StaticStruct()) {
+			FGameplayTag* GameplayTagStr = static_cast<FGameplayTag*>(OutValue);
+			FGameplayTag NewTag = FGameplayTag::RequestGameplayTag(FName(*NewJsonValue->AsObject()->GetStringField(TEXT("TagName"))), false);
+			*GameplayTagStr = NewTag;
+			return;
+		}
+
+		/* FGameplayTagContainer (handled from UEParse data) */
+		if (StructProperty->Struct == FGameplayTagContainer::StaticStruct()) {
+			FGameplayTagContainer* GameplayTagContainerStr = static_cast<FGameplayTagContainer*>(OutValue);
+
+			auto GameplayTags = JsonValue->AsArray();
+
+#if UE4_18_BELOW
+			for (TSharedPtr<FJsonValue> GameplayTagValue : GameplayTags) {
+#else
+			for (TSharedPtr GameplayTagValue : GameplayTags) {
+#endif
+				FString GameplayTagString = GameplayTagValue->AsString();
+				FGameplayTag GameplayTag = FGameplayTag::RequestGameplayTag(FName(*GameplayTagString));
+				
+				GameplayTagContainerStr->AddTag(GameplayTag);
+			}
+
+			return;
+		}
+
+#if !UE4_18_BELOW
+		if (StructProperty->Struct == FMovieSceneFrameRange::StaticStruct()) {
+			FMovieSceneFrameRange* MovieSceneFrameRange = static_cast<FMovieSceneFrameRange*>(OutValue);
+			TSharedPtr<FJsonObject> JsonObject = NewJsonValue->AsObject()->GetObjectField(TEXT("Value"));
+
+			FMovieSceneFrameRange Range;
+
+			if (JsonObject->HasField(TEXT("LowerBound"))) {
+				TSharedPtr<FJsonObject> Bound = JsonObject->GetObjectField(TEXT("LowerBound"));
+				TSharedPtr<FJsonObject> BoundValue = Bound->GetObjectField(TEXT("Value"));
+
+				int32 Type = Bound->GetIntegerField(TEXT("Type"));
+				int32 Value = BoundValue->GetIntegerField(TEXT("Value"));
+
+				FFrameNumber BoundFrame;
+				BoundFrame.Value = Value;
+
+				if (Type == 0) {
+					Range.Value.SetLowerBound(TRangeBound<FFrameNumber>::Exclusive(BoundFrame));
+				} else if (Type == 1) {
+					Range.Value.SetLowerBound(TRangeBound<FFrameNumber>::Inclusive(BoundFrame));
+				}
+			}
+
+			if (JsonObject->HasField(TEXT("UpperBound"))) {
+				TSharedPtr<FJsonObject> Bound = JsonObject->GetObjectField(TEXT("UpperBound"));
+				TSharedPtr<FJsonObject> BoundValue = Bound->GetObjectField(TEXT("Value"));
+
+				int32 Type = Bound->GetIntegerField(TEXT("Type"));
+				int32 Value = BoundValue->GetIntegerField(TEXT("Value"));
+
+				FFrameNumber BoundFrame;
+				BoundFrame.Value = Value;
+
+				if (Type == 0) {
+					Range.Value.SetUpperBound(TRangeBound<FFrameNumber>::Exclusive(BoundFrame));
+				} else if (Type == 1) {
+					Range.Value.SetUpperBound(TRangeBound<FFrameNumber>::Inclusive(BoundFrame));
+				}
+			}
+
+			*MovieSceneFrameRange = Range;
+
+			return;
+		}
+#endif
+
+		if (StructProperty->Struct->GetFName() == "SoftObjectPath") {
+			TSharedPtr<FJsonObject> SoftJsonObjectProperty;
+			FString PathString = "";
+
+			SoftJsonObjectProperty = NewJsonValue->AsObject();
+			PathString = SoftJsonObjectProperty->GetStringField(TEXT("AssetPathName"));
+			
+			if (PathString != "") {
+				FSoftObjectPtr* ObjectPtr = static_cast<FSoftObjectPtr*>(OutValue);
+				*ObjectPtr = FSoftObjectPath(PathString);
+
+				if (!ObjectPtr->LoadSynchronous()) {
+					/* Try importing it using Cloud */
+					FString PackagePath;
+					FString AssetName;
+					PathString.Split(".", &PackagePath, &AssetName);
+					TObjectPtr<UObject> T;
+
+					FString PropertyClassName = "DataAsset";
+				
+					IImporter::DownloadWrapper(T, PropertyClassName, AssetName, PackagePath);
+				}
+			}
+		}
+		
+		/* JSON for FGuids are FStrings */
+		FString OutString;
+		
+		if (JsonValue->TryGetString(OutString)) {
+#if UE4_18_BELOW
+			FGuid GUID;
+			if (FGuid::Parse(OutString, GUID))
+			{
+				TSharedRef<FJsonObject> SharedObject = MakeShareable(new FJsonObject());
+				SharedObject->SetNumberField(TEXT("A"), GUID.A); SharedObject->SetNumberField(TEXT("B"), GUID.B);
+				SharedObject->SetNumberField(TEXT("C"), GUID.C); SharedObject->SetNumberField(TEXT("D"), GUID.D);
+
+				const TSharedRef<FJsonValue> NewValue = MakeShareable(new FJsonValueObject(SharedObject));
+				NewJsonValue = NewValue;
+			}
+#else
+			FGuid GUID = FGuid(OutString); /* Create GUID from String */
+
+			TSharedRef<FJsonObject> SharedObject = MakeShareable(new FJsonObject());
+			SharedObject->SetNumberField(TEXT("A"), GUID.A); SharedObject->SetNumberField(TEXT("B"), GUID.B);
+			SharedObject->SetNumberField(TEXT("C"), GUID.C); SharedObject->SetNumberField(TEXT("D"), GUID.D);
+
+			const TSharedRef<FJsonValue> NewValue = MakeShareable(new FJsonValueObject(SharedObject));
+			NewJsonValue = NewValue;
+#endif
+		}
+
+		if (StructProperty->Struct == FFontData::StaticStruct()) {
+			FFontData* FontData = static_cast<FFontData*>(OutValue);
+
+			TSharedPtr<FJsonObject> JsonObject = NewJsonValue->AsObject();
+			
+			if (JsonObject->HasField(TEXT("LocalFontFaceAsset"))) {
+				TSharedPtr<FJsonObject> LocalFontFaceExport = JsonObject->GetObjectField(TEXT("LocalFontFaceAsset"));
+
+				if (Importer == nullptr) {
+					Importer = new IImporter();
+				}
+
+				TObjectPtr<UFontFace> FontFacePtr;
+				
+				Importer->SetParent(ObjectSerializer->Parent);
+				Importer->LoadExport(&LocalFontFaceExport, FontFacePtr);
+
+				if (UFontFace* FontFace = FontFacePtr.Get()) {
+#if UE4_18_BELOW
+#else
+					*FontData = FFontData(FontFace, 0);
+#endif
+				}
+			}
+		}
+
+		/* To serialize struct, we need its type and value pointer, because struct value doesn't contain type information */
+		DeserializeStruct(StructProperty->Struct, NewJsonValue->AsObject().ToSharedRef(), OutValue);
+
+#if ENGINE_UE4
+		/* If we're importing from UE5 to UE4, adjust the material attribute nodes to adjust for attributes that don't exist */
+		if (Property->GetCPPType(nullptr, CPPF_None) == TEXT("FExpressionInput")) {
+			if (GJsonAsAssetRuntime.IsUE5()) {
+				FExpressionInput* ExpressionInput = static_cast<FExpressionInput*>(OutValue);
+
+				if (ExpressionInput &&
+					ExpressionInput->OutputIndex > 10
+					&& ExpressionInput->Expression
+					&& ExpressionInput->Expression->GetFName().ToString().Contains("MaterialExpressionBreakMaterialAttributes")) {
+
+					ExpressionInput->OutputIndex += 2;
+				}
+			}
+
+			if (GJsonAsAssetRuntime.IsOlderUE4Target()) {
+				FExpressionInput* ExpressionInput = static_cast<FExpressionInput*>(OutValue);
+
+				if (ExpressionInput
+					&& ExpressionInput->Expression
+					&& ExpressionInput->Expression->GetFName().ToString().Contains("MaterialExpressionBreakMaterialAttributes")) {
+					if (ExpressionInput->OutputIndex > 3) {
+						ExpressionInput->OutputIndex += 1;
+					}
+
+					if (ExpressionInput->OutputIndex > 8) {
+						ExpressionInput->OutputIndex += 1;
+					}
+				}
+			}
+		}
+#endif
+	}
+#if UE4_18_BELOW
+	else if (UByteProperty* ByteProperty = Cast<UByteProperty>(Property)) {
+#else
+	else if (const FByteProperty* ByteProperty = CastField<const FByteProperty>(Property)) {
+#endif
+		/* If we have a string provided, make sure Enum is not null */
+		if (JsonValue->Type == EJson::String) {
+			FString EnumAsString = JsonValue->AsString();
+
+			check(ByteProperty->Enum);
+			int64 EnumerationValue = ByteProperty->Enum->GetValueByNameString(EnumAsString);
+
+			/* Somethings wrong!!! */
+			if (EnumerationValue == -1) {
+				UE_LOG(LogJsonAsAsset, Warning, TEXT("Invalid enum value for property '%s'!"), *Property->GetName());
+
+				UE_LOG(LogJsonAsAsset, Warning, TEXT("Enum name: %s"), *EnumAsString);
+				UE_LOG(LogJsonAsAsset, Warning, TEXT("Enum type: %s"), *ByteProperty->Enum->GetName());
+				UE_LOG(LogJsonAsAsset, Warning, TEXT("Available values:"));
+
+				for (int32 Index = 0; Index < ByteProperty->Enum->NumEnums() - 1; ++Index)
+				{
+					FString Name = ByteProperty->Enum->GetNameStringByIndex(Index);
+					int64 Value = ByteProperty->Enum->GetValueByIndex(Index);
+					UE_LOG(LogJsonAsAsset, Warning, TEXT("  [%d] %s = %lld"), Index, *Name, Value);
+				}
+
+				EnumerationValue = 0;
+			}
+			
+			ByteProperty->SetIntPropertyValue(OutValue, EnumerationValue);
+		}
+		else {
+			/* Should be a number, set property value accordingly */
+			const int64 NumberValue = static_cast<int64>(NewJsonValue->AsNumber());
+			ByteProperty->SetIntPropertyValue(OutValue, NumberValue);
+		}
+		/* Primitives below, they are serialized as plain json values */
+	}
+#if UE4_18_BELOW
+	else if (UNumericProperty* NumberProperty = Cast<UNumericProperty>(Property)) {
+#else
+	else if (const FNumericProperty* NumberProperty = CastField<const FNumericProperty>(Property)) {
+#endif
+		const double NumberValue = NewJsonValue->AsNumber();
+		if (NumberProperty->IsFloatingPoint()) {
+			NumberProperty->SetFloatingPointPropertyValue(OutValue, NumberValue);
+		}
+		
+		else {
+			NumberProperty->SetIntPropertyValue(OutValue, static_cast<int64>(NumberValue));
+		}
+	}
+#if UE4_18_BELOW
+	else if (UBoolProperty* BoolProperty = Cast<UBoolProperty>(Property)) {
+#else
+	else if (const FBoolProperty* BoolProperty = CastField<const FBoolProperty>(Property)) {
+#endif
+		const bool BooleanValue = NewJsonValue->AsBool();
+		BoolProperty->SetPropertyValue(OutValue, BooleanValue);
+	}
+#if UE4_18_BELOW
+	else if (Property->IsA<UStrProperty>()) {
+#else
+	else if (Property->IsA<FStrProperty>()) {
+#endif
+		const FString StringValue = NewJsonValue->AsString();
+		*static_cast<FString*>(OutValue) = StringValue;
+	}
+#if UE4_18_BELOW
+	else if (UEnumProperty* EnumProperty = Cast<UEnumProperty>(Property)) {
+#else
+	else if (const FEnumProperty* EnumProperty = CastField<const FEnumProperty>(Property)) {
+#endif
+		FString EnumAsString = NewJsonValue->AsString();
+
+		if (EnumAsString.Contains("::")) {
+			EnumAsString.Split("::", nullptr, &EnumAsString);
+		}
+		
+		/* Prefer readable enum names in result json to raw numbers */
+		int64 EnumerationValue = EnumProperty->GetEnum()->GetValueByNameString(EnumAsString);
+
+		if (EnumerationValue != INDEX_NONE) {
+			EnumProperty->GetUnderlyingProperty()->SetIntPropertyValue(OutValue, EnumerationValue);
+		}
+	}
+#if UE4_18_BELOW
+	else if (Property->IsA<UNameProperty>()) {
+#else
+	else if (Property->IsA<FNameProperty>()) {
+#endif
+		/* Name is perfectly representable as string */
+		const FString NameString = NewJsonValue->AsString();
+		*static_cast<FName*>(OutValue) = *NameString;
+	}
+#if UE4_18_BELOW
+	else if (UTextProperty* TextProperty = Cast<UTextProperty>(Property)) {
+#else
+	else if (const FTextProperty* TextProperty = CastField<const FTextProperty>(Property)) {
+#endif
+		const FString SerializedValue = NewJsonValue->AsString();
+		
+		if (!SerializedValue.IsEmpty()) {
+#if UE4_18_BELOW
+			*static_cast<FText*>(OutValue) = FText::FromString(SerializedValue);
+#else
+			FTextStringHelper::ReadFromBuffer(*SerializedValue, *static_cast<FText*>(OutValue));
+#endif
+		} else {
+			/* TODO: Somehow add other needed things like Namespace, Key, and LocalizedString */
+			TSharedPtr<FJsonObject> Object = NewJsonValue->AsObject().ToSharedRef();
+
+			/* Retrieve properties */
+			FString TextNamespace = Object->GetStringField(TEXT("Namespace"));
+			FString UniqueKey = Object->GetStringField(TEXT("Key"));
+			FString SourceString = Object->GetStringField(TEXT("SourceString"));
+
+			TextProperty->SetPropertyValue(OutValue, FInternationalization::ForUseOnlyByLocMacroAndGraphNodeTextLiterals_CreateText(*SourceString, *TextNamespace, *UniqueKey));
+		}
+	}
+#if !UE4_18_BELOW
+	else if (CastField<const FFieldPathProperty>(Property)) {
+		FFieldPath FieldPath;
+		FieldPath.Generate(*NewJsonValue->AsString());
+		*static_cast<FFieldPath*>(OutValue) = FieldPath;
+	}
+#endif
+	else {
+		UE_LOG(LogJsonAsAssetPropertySerializer, Fatal, TEXT("Found unsupported property type when deserializing value: %s"), *Property->GetClass()->GetName());
+	}
+}
+
+void UPropertySerializer::DisablePropertySerialization(const UStruct* Struct, const FName PropertyName) {
+#if UE4_18_BELOW
+	UProperty* Property = Struct->FindPropertyByName(PropertyName);
+#else
+	FProperty* Property = Struct->FindPropertyByName(PropertyName);
+#endif
+	checkf(Property, TEXT("Cannot find Property %s in Struct %s"), *PropertyName.ToString(), *Struct->GetPathName());
+	this->BlacklistedProperties.Add(Property);
+}
+
+void UPropertySerializer::AddStructSerializer(UScriptStruct* Struct, const TSharedPtr<FStructSerializer>& Serializer) {
+	this->StructSerializers.Add(Struct, Serializer);
+}
+
+#if UE4_18_BELOW
+bool UPropertySerializer::ShouldDeserializeProperty(UProperty* Property) const {
+#else
+bool UPropertySerializer::ShouldDeserializeProperty(FProperty* Property) const {
+#endif
+	/* Skip deprecated properties */
+	if (Property->HasAnyPropertyFlags(CPF_Deprecated)) {
+		return false;
+	}
+	
+	/* Skip blacklisted properties */
+	if (this != nullptr && this && BlacklistedProperties.IsValidIndex(0) && BlacklistedProperties.Contains(Property)) {
+		return false;
+	}
+	
+	return true;
+}
+
+void UPropertySerializer::DeserializeStruct(UScriptStruct* Struct, const TSharedRef<FJsonObject>& Properties, void* OutValue) const {
+	FStructSerializer* StructSerializer = GetStructSerializer(Struct);
+	StructSerializer->Deserialize(Struct, OutValue, Properties);
+}
+
+FStructSerializer* UPropertySerializer::GetStructSerializer(const UScriptStruct* Struct) const {
+	check(Struct);
+	TSharedPtr<FStructSerializer> const* StructSerializer = StructSerializers.Find(Struct);
+	return StructSerializer && ensure(StructSerializer->IsValid()) ? StructSerializer->Get() : FallbackStructSerializer.Get();
+}
+
+PRAGMA_ENABLE_OPTIMIZATION

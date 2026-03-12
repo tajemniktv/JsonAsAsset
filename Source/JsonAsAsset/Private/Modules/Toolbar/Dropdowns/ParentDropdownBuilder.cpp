@@ -1,0 +1,15 @@
+﻿/* Copyright JsonAsAsset Contributors 2024-2026 */
+
+#include "Modules/Toolbar/Dropdowns/ParentDropdownBuilder.h"
+
+#include "JsonAsAsset.h"
+#include "Modules/Metadata.h"
+#include "Utilities/Compatibility.h"
+#include "Utilities/EngineUtilities.h"
+
+void IParentDropdownBuilder::Build(FMenuBuilder& MenuBuilder) const {
+	MenuBuilder.BeginSection(
+		"JsonAsAssetSection", 
+		FText::FromString(FJMetadata::Version)
+	);
+}
