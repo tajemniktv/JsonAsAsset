@@ -6,12 +6,6 @@ Binaries/*
 Source/JsonAsAsset/Public/Importers/Types/Cascade/*
 Source/JsonAsAsset/Private/Importers/Types/Cascade/*
 
-# Blueprint Importing is not finalized ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Source/JsonAsAsset/Public/Importers/Constructor/Blueprint/*
-Source/JsonAsAsset/Private/Importers/Constructor/Blueprint/*
-Source/JsonAsAsset/Private/Importers/Types/Blueprint/*
-Source/JsonAsAsset/Public/Importers/Types/Blueprint/*
-
 # NotForLicensees ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 /Source/JsonAsAsset/Private/NotForLicensees/*
 /Source/JsonAsAsset/Public/NotForLicensees
@@ -94,3 +88,8 @@ _[Ss]cripts
 *.sln
 .idea/
 
+Source/JsonAsAsset/Private/Importers/Types/Blueprint/AnimationBlueprintImporter.cpp
+Source/JsonAsAsset/Public/Importers/Types/Blueprint/AnimationBlueprintImporter.h
+Source/JsonAsAsset/Public/Importers/Types/Blueprint/Utilities/AnimationBlueprintUtilities.h
+Source/JsonAsAsset/Public/Importers/Types/Blueprint/Utilities/AnimNodeLayoutUtillties.h
+Source/JsonAsAsset/Public/Importers/Types/Blueprint/Utilities/StateMachineUtilities.h
