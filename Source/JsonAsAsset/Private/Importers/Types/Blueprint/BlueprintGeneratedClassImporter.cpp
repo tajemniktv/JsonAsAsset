@@ -244,60 +244,61 @@ void IBlueprintGeneratedClassImporter::ReadFuncMap(UBlueprint* BP) {
 	// Remove all the event nodes before creating the new ones
 	RemoveEventNodes(UberGraph);
 
-	const TSharedPtr<FJsonObject> FuncMapObject = GetAssetData()->GetObjectField(TEXT("FuncMap"));
+	const TSharedPtr<FJsonObject>* FuncMapObject;
+	if (GetAssetData()->TryGetObjectField(TEXT("FuncMap"), FuncMapObject)) {
+		for (const auto& Pair : (*FuncMapObject)->Values) {
+			FUObjectExport FunctionExport = AssetContainer.GetExportByObjectPath(Pair.Value->AsObject());
 
-	for (const auto& Pair : FuncMapObject->Values) {
-		FUObjectExport FunctionExport = AssetContainer.GetExportByObjectPath(Pair.Value->AsObject());
+			const FString FunctionName = FunctionExport.GetName().ToString();
 
-		const FString FunctionName = FunctionExport.GetName().ToString();
-
-		UEdGraph* ExistingGraph = FindObject<UEdGraph>(BP, *FunctionName);
-		if (ExistingGraph) {
-			continue;
-		}
-
-		const FString FunctionFlags = FunctionExport.JsonObject->GetStringField(TEXT("FunctionFlags"));
-
-		// Create function
-		if (!FunctionFlags.Contains("FUNC_Event")) {
-			UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
-				BP,
-				*FunctionName,
-				UEdGraph::StaticClass(),
-				UEdGraphSchema_K2::StaticClass()
-			);
-
-			FBlueprintEditorUtils::AddFunctionGraph<UFunction>(BP, NewGraph, true, nullptr);
-
-			UEdGraphPin* EntryPin = nullptr;
-			for (UEdGraphNode* Node : NewGraph->Nodes)
-			{
-				if (UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(Node))
-				{
-					EntryNode->CustomGeneratedFunctionName = FName(*FunctionName);
-					break;
-				}
+			UEdGraph* ExistingGraph = FindObject<UEdGraph>(BP, *FunctionName);
+			if (ExistingGraph) {
+				continue;
 			}
 
-			CreateVariables(BP, FunctionName, FunctionExport.JsonObject->GetArrayField(TEXT("Children")), NewGraph);
-		}
-		// Create event
-		else {
-			const TSharedPtr<FJsonObject> SuperStruct = FunctionExport.JsonObject->GetObjectField(TEXT("SuperStruct"));
-			const FString ObjectName = SuperStruct->GetStringField(TEXT("ObjectName")).Replace(TEXT("Function'"), TEXT("")).Replace(TEXT("'"), TEXT(""));
-			const FString ObjectPath = SuperStruct->GetStringField(TEXT("ObjectPath"));
-			FString OuterName, FunctionName;
-			ObjectName.Split(TEXT(":"), &OuterName, &FunctionName);
+			const FString FunctionFlags = FunctionExport.JsonObject->GetStringField(TEXT("FunctionFlags"));
 
-			UFunction* Function = BP->ParentClass->FindFunctionByName(FName(*FunctionName));
-			if (Function && UberGraph) {
-				UK2Node_Event* EventNode = NewObject<UK2Node_Event>(UberGraph);
-				EventNode->EventReference.SetFromField<UFunction>(Function, false);
-				EventNode->bOverrideFunction = false;
-				EventNode->CreateNewGuid();
-				EventNode->PostPlacedNewNode();
-				EventNode->AllocateDefaultPins();
-				UberGraph->AddNode(EventNode, true, false);
+			// Create function
+			if (!FunctionFlags.Contains("FUNC_Event")) {
+				UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+					BP,
+					*FunctionName,
+					UEdGraph::StaticClass(),
+					UEdGraphSchema_K2::StaticClass()
+				);
+
+				FBlueprintEditorUtils::AddFunctionGraph<UFunction>(BP, NewGraph, true, nullptr);
+
+				UEdGraphPin* EntryPin = nullptr;
+				for (UEdGraphNode* Node : NewGraph->Nodes)
+				{
+					if (UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(Node))
+					{
+						EntryNode->CustomGeneratedFunctionName = FName(*FunctionName);
+						break;
+					}
+				}
+
+				CreateVariables(BP, FunctionName, FunctionExport.JsonObject->GetArrayField(TEXT("Children")), NewGraph);
+			}
+			// Create event
+			else {
+				const TSharedPtr<FJsonObject> SuperStruct = FunctionExport.JsonObject->GetObjectField(TEXT("SuperStruct"));
+				const FString ObjectName = SuperStruct->GetStringField(TEXT("ObjectName")).Replace(TEXT("Function'"), TEXT("")).Replace(TEXT("'"), TEXT(""));
+				const FString ObjectPath = SuperStruct->GetStringField(TEXT("ObjectPath"));
+				FString OuterName, EventName;
+				ObjectName.Split(TEXT(":"), &OuterName, &EventName);
+
+				UFunction* Function = BP->ParentClass->FindFunctionByName(FName(*EventName));
+				if (Function && UberGraph) {
+					UK2Node_Event* EventNode = NewObject<UK2Node_Event>(UberGraph);
+					EventNode->EventReference.SetFromField<UFunction>(Function, false);
+					EventNode->bOverrideFunction = false;
+					EventNode->CreateNewGuid();
+					EventNode->PostPlacedNewNode();
+					EventNode->AllocateDefaultPins();
+					UberGraph->AddNode(EventNode, true, false);
+				}
 			}
 		}
 	}
