@@ -6,20 +6,64 @@
 #include "Importers/Constructor/TemplatedImporter.h"
 #include "Importers/Types/DataAssetImporter.h"
 #include "Importers/Types/Texture/TextureImporter.h"
+#include "Importers/Types/Blueprint/BlueprintImporter.h"
+#include "Importers/Types/Blueprint/AnimationBlueprintImporter.h"
+#include "Importers/Types/Blueprint/WidgetBlueprintImporter.h"
 #include "Settings/Runtime.h"
 #include "Styling/SlateIconFinder.h"
 #include "Utilities/AssetUtilities.h"
 #include "Engine/EngineUtilities.h"
 #include "Utilities/JsonUtilities.h"
 
+static UClass* ResolveClassFromExportMetadata(FUObjectExport* Export) {
+	if (!Export || !Export->Has(TEXT("Class"))) {
+		return nullptr;
+	}
+
+	FString ClassField = Export->GetString(TEXT("Class"));
+	if (ClassField.IsEmpty()) {
+		return nullptr;
+	}
+
+	FString ClassObjectPath = ClassField;
+	if (ClassField.Contains(TEXT("'"))) {
+		if (!ClassField.Split(TEXT("'"), nullptr, &ClassObjectPath, ESearchCase::CaseSensitive, ESearchDir::FromStart)) {
+			return nullptr;
+		}
+		ClassObjectPath.Split(TEXT("'"), &ClassObjectPath, nullptr, ESearchCase::CaseSensitive, ESearchDir::FromStart);
+	}
+
+	if (ClassObjectPath.IsEmpty()) {
+		return nullptr;
+	}
+
+	if (UClass* LoadedClass = StaticLoadClass(UObject::StaticClass(), nullptr, *ClassObjectPath)) {
+		return LoadedClass;
+	}
+
+#if UE5_6_BEYOND
+	return FindFirstObject<UClass>(*ClassObjectPath);
+#else
+	return FindObject<UClass>(ANY_PACKAGE, *ClassObjectPath);
+#endif
+}
+
 bool IImportReader::ReadExportsAndImport(const TArray<TSharedPtr<FJsonValue>>& Exports, const FString& File, IImporter*& OutImporter, const bool HideNotifications) {
 	FUObjectExportContainer* Container = new FUObjectExportContainer(Exports);
 
-	const bool IsBlueprint = Container->FindByType(FString("BlueprintGeneratedClass"))->IsJsonValid();
+	bool HasBlueprintGeneratedClassExport = false;
+	for (FUObjectExport* Export : Container->Exports) {
+		if (Export && Export->GetType().ToString().Contains(TEXT("BlueprintGeneratedClass"))) {
+			HasBlueprintGeneratedClassExport = true;
+			break;
+		}
+	}
 	
 	for (FUObjectExport* Export : Container->Exports) {
-		if (IsBlueprint) {
-			if (Export->GetType() != "BlueprintGeneratedClass") continue;
+		if (HasBlueprintGeneratedClassExport) {
+			if (!Export->GetType().ToString().Contains(TEXT("BlueprintGeneratedClass"))) {
+				continue;
+			}
 		}
 		
 		if (IImporter* Importer = ReadExportAndImport(Container, Export, File, HideNotifications)) OutImporter = Importer;
@@ -39,7 +83,9 @@ IImporter* IImportReader::ReadExportAndImport(FUObjectExportContainer* Container
 		Name.Split("_C", &Name, nullptr, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
 	}
 
-	const UClass* Class = FindClassByType(Type);
+	const UClass* ExportClass = Export->GetClass();
+	const UClass* MetadataClass = ExportClass ? nullptr : ResolveClassFromExportMetadata(Export);
+	const UClass* Class = ExportClass ? ExportClass : (MetadataClass ? MetadataClass : FindClassByType(Type));
 	
 	if (Class == nullptr) return nullptr;
 
@@ -102,6 +148,17 @@ IImporter* IImportReader::ReadExportAndImport(FUObjectExportContainer* Container
 	/* Try to find the importer using a factory delegate */
 	if (const FImporterFactoryDelegate* Factory = FindFactoryForAssetType(Type)) {
 		Importer = (*Factory)();
+	}
+
+	/* Route blueprint-family generated classes through the proper importer even when the exact type isn't registered. */
+	if (Importer == nullptr && Type.Contains(TEXT("BlueprintGeneratedClass"))) {
+		if (Type.Contains(TEXT("AnimBlueprintGeneratedClass"))) {
+			Importer = new IAnimationBlueprintImporter();
+		} else if (Type.Contains(TEXT("WidgetBlueprintGeneratedClass"))) {
+			Importer = new IWidgetBlueprintImporter();
+		} else {
+			Importer = new IBlueprintImporter();
+		}
 	}
 
 	/* If it inherits DataAsset, use the data asset importer */

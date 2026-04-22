@@ -155,19 +155,28 @@ inline void HarvestAndTagConnectedStateMachineNodes(const FString& StartKey, con
 
 inline void HandlePropertyBinding(FUObjectExport* NodeExport, const TArray<TSharedPtr<FJsonValue>>& JsonObjects, UAnimGraphNode_Base* Node, IImporter* Importer, UAnimBlueprint* AnimBlueprint) {
 	const TSharedPtr<FJsonObject> NodeProperties = NodeExport->JsonObject;
+	if (!NodeProperties.IsValid() || !Node || !Importer || !AnimBlueprint) {
+		return;
+	}
 	
 	/* Let the user know that this node has nodes plugged into it */
 	if (NodeProperties->HasField(TEXT("EvaluateGraphExposedInputs"))) {
 		const TSharedPtr<FJsonObject> EvaluateGraphExposedInputs = NodeProperties->GetObjectField(TEXT("EvaluateGraphExposedInputs"));
+		if (!EvaluateGraphExposedInputs.IsValid() || !EvaluateGraphExposedInputs->HasField(TEXT("BoundFunction"))) {
+			return;
+		}
 
 		bool bBoundFunction = EvaluateGraphExposedInputs->GetStringField(TEXT("BoundFunction")) != "None";
 		
 		if (EvaluateGraphExposedInputs->HasField(TEXT("CopyRecords")) || bBoundFunction) {
-			const TArray<TSharedPtr<FJsonValue>> CopyRecords = EvaluateGraphExposedInputs->GetArrayField(TEXT("CopyRecords"));
+			const TArray<TSharedPtr<FJsonValue>> CopyRecords = EvaluateGraphExposedInputs->HasField(TEXT("CopyRecords"))
+				? EvaluateGraphExposedInputs->GetArrayField(TEXT("CopyRecords"))
+				: TArray<TSharedPtr<FJsonValue>>();
 
 			if (CopyRecords.Num() > 0) {
 				for (const auto& CopyRecordAsValue : CopyRecords) {
 					const TSharedPtr<FJsonObject>& CopyRecordAsObject = CopyRecordAsValue->AsObject();
+					if (!CopyRecordAsObject.IsValid()) continue;
 
 					if (!CopyRecordAsObject->HasField(TEXT("DestProperty"))) continue;
 					if (CopyRecordAsObject->HasField(TEXT("BoundFunction")) && CopyRecordAsObject->GetStringField(TEXT("BoundFunction")) != TEXT("None")) {
@@ -236,8 +245,9 @@ inline void HandlePropertyBinding(FUObjectExport* NodeExport, const TArray<TShar
 
 						PropertyBinding.PropertyPath.Append({ SourceSubPropertyName });
 
-						if (CopyRecordAsObject->GetObjectField(TEXT("CachedSourceStructSubProperty"))) {
+						if (CopyRecordAsObject->HasField(TEXT("CachedSourceStructSubProperty"))) {
 							TSharedPtr<FJsonObject> StructObject = CopyRecordAsObject->GetObjectField(TEXT("CachedSourceStructSubProperty"));
+							if (!StructObject.IsValid()) continue;
 							
 							TObjectPtr<UObject> LoadedObject;
 							Importer->LoadExport<UObject>(&StructObject, LoadedObject);

@@ -43,7 +43,9 @@ public:
     virtual void SetAsset(UObject* InAsset);
     
     template <class T>
-    T* GetTypedAsset() const;
+    T* GetTypedAsset() const {
+        return AssetExport->Object ? Cast<T>(AssetExport->Object) : nullptr;
+    }
 
     /* Serializer ~~~~~~~~~~~~~~~> */
 public:

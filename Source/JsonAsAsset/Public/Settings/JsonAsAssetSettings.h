@@ -16,6 +16,81 @@
 extern FName GJsonAsAssetSettingsCategoryName;
 extern FName GJsonAsAssetInternalName;
 
+UENUM()
+enum class EJBlueprintReimportPolicy : uint8
+{
+	ReuseValid UMETA(DisplayName = "ReuseValid"),
+	RecreateInvalid UMETA(DisplayName = "RecreateInvalid"),
+	AlwaysRecreate UMETA(DisplayName = "AlwaysRecreate")
+};
+
+UENUM()
+enum class EJBlueprintLogDetail : uint8
+{
+	Normal UMETA(DisplayName = "Normal"),
+	Verbose UMETA(DisplayName = "Verbose")
+};
+
+UENUM()
+enum class EJBlueprintCompilePolicy : uint8
+{
+	Immediate UMETA(DisplayName = "Immediate"),
+	DeferredBatch UMETA(DisplayName = "DeferredBatch"),
+	Manual UMETA(DisplayName = "Manual")
+};
+
+USTRUCT()
+struct FJBlueprintImportSettings
+{
+	GENERATED_BODY()
+public:
+	/* If true, importer fails when critical references are missing. If false, importer warns and keeps going. */
+	UPROPERTY(EditAnywhere, Config, Category = BlueprintImport)
+	bool StrictMode = false;
+
+	/* Controls how existing Blueprint/AnimBlueprint assets are handled during reimport. */
+	UPROPERTY(EditAnywhere, Config, Category = BlueprintImport)
+	EJBlueprintReimportPolicy ReimportPolicy = EJBlueprintReimportPolicy::RecreateInvalid;
+
+	/* Controls importer logging detail for Blueprint/AnimBlueprint import path. */
+	UPROPERTY(EditAnywhere, Config, Category = BlueprintImport)
+	EJBlueprintLogDetail LogDetail = EJBlueprintLogDetail::Normal;
+
+	/* Controls when Blueprint/AnimBlueprint assets should be compiled during import. */
+	UPROPERTY(EditAnywhere, Config, Category = BlueprintImport)
+	EJBlueprintCompilePolicy CompilePolicy = EJBlueprintCompilePolicy::DeferredBatch;
+};
+
+USTRUCT()
+struct FJCompatibilityFallbackSettings
+{
+	GENERATED_BODY()
+public:
+	/* Enables compatibility fallback behavior for BlueprintGeneratedClass import edge-cases. */
+	UPROPERTY(EditAnywhere, Config, Category = CompatibilityFallback, AdvancedDisplay)
+	bool BlueprintGeneratedClass = false;
+
+	/* Enables compatibility fallback behavior for WidgetBlueprintGeneratedClass import edge-cases. */
+	UPROPERTY(EditAnywhere, Config, Category = CompatibilityFallback, AdvancedDisplay)
+	bool WidgetBlueprintGeneratedClass = false;
+
+	/* Enables compatibility fallback behavior for AnimBlueprintGeneratedClass import edge-cases. */
+	UPROPERTY(EditAnywhere, Config, Category = CompatibilityFallback, AdvancedDisplay)
+	bool AnimBlueprintGeneratedClass = false;
+
+	/* Enables compatibility fallback behavior for StaticMesh import edge-cases. */
+	UPROPERTY(EditAnywhere, Config, Category = CompatibilityFallback, AdvancedDisplay)
+	bool StaticMesh = false;
+
+	/* Enables compatibility fallback behavior for MaterialParameterCollection import edge-cases. */
+	UPROPERTY(EditAnywhere, Config, Category = CompatibilityFallback, AdvancedDisplay)
+	bool MaterialParameterCollection = false;
+
+	/* Enables compatibility fallback behavior for PhysicalMaterial import edge-cases. */
+	UPROPERTY(EditAnywhere, Config, Category = CompatibilityFallback, AdvancedDisplay)
+	bool PhysicalMaterial = false;
+};
+
 USTRUCT()
 struct FJSettings
 {
@@ -70,6 +145,12 @@ public:
 	
 	UPROPERTY(EditAnywhere, Config, Category = Settings)
 	FJSettings AssetSettings;
+
+	UPROPERTY(EditAnywhere, Config, Category = BlueprintImport)
+	FJBlueprintImportSettings BlueprintImport;
+
+	UPROPERTY(EditAnywhere, Config, Category = CompatibilityFallback, AdvancedDisplay)
+	FJCompatibilityFallbackSettings CompatibilityFallback;
 
 	UPROPERTY(EditAnywhere, Config, Category = Redirectors, meta = (TitleProperty = "Name"))
 	TArray<FJRedirector> Redirectors;

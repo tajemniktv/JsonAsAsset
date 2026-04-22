@@ -11,21 +11,19 @@ inline bool ShouldUseOctetStream(
 {
 #if UE4_26_BELOW || UE5_5_BEYOND
 	return true;
-#endif
-
-#if PLATFORM_LINUX
+#elif PLATFORM_LINUX
 	return false;
-#endif
-	
-	if (Type == "TextureLightProfile"
-	 || Type == "TextureCube"
-	 || Type == "VolumeTexture"
-	 || Type == "TextureRenderTarget2D")
+#else
+	if (Type == TEXT("TextureLightProfile")
+	 || Type == TEXT("TextureCube")
+	 || Type == TEXT("VolumeTexture")
+	 || Type == TEXT("TextureRenderTarget2D"))
 	{
 		return true;
 	}
-	
+
 	return IsVectorDisplacementMap;
+#endif
 }
 
 struct FTextureCreatorUtilities {
@@ -55,7 +53,7 @@ public:
 	bool DeserializeTexturePlatformData(UTexture* Texture, TArray<uint8>& Data, FTexturePlatformData& TexturePlatformData, const TSharedPtr<FJsonObject>& Properties);
 
 private:
-	static void GetDecompressedTextureData(uint8* Data, uint8*& OutData, const int SizeX, const int SizeY, const int SizeZ, const int TotalSize, const EPixelFormat Format);
+	static void GetDecompressedTextureData(uint8* Data, int SourceDataSize, uint8*& OutData, const int SizeX, const int SizeY, const int SizeZ, const int TotalSize, const EPixelFormat Format);
 
 protected:
 	FString AssetName;

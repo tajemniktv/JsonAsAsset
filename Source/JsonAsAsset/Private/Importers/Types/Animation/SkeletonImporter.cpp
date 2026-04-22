@@ -204,6 +204,41 @@ void ISkeletonImporter::ApplySkeletalAssetData(USkeleton* Skeleton) const {
 		Skeleton->AnimRetargetSources.Add(KeyName, RetargetSource);
 	}
 
+	/* NameMappings / CurveMetaDataMap ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+	const TSharedPtr<FJsonObject>* NameMappingsObjectPtr;
+	if (GetAssetData()->TryGetObjectField(TEXT("NameMappings"), NameMappingsObjectPtr))
+	{
+		const TSharedPtr<FJsonObject>* AnimationCurvesObjectPtr;
+		if ((*NameMappingsObjectPtr)->TryGetObjectField(TEXT("AnimationCurves"), AnimationCurvesObjectPtr))
+		{
+			const TSharedPtr<FJsonObject>* CurveMetaDataMapObjectPtr;
+			if ((*AnimationCurvesObjectPtr)->TryGetObjectField(TEXT("CurveMetaDataMap"), CurveMetaDataMapObjectPtr))
+			{
+				for (const auto& Pair : (*CurveMetaDataMapObjectPtr)->Values)
+				{
+					const FName CurveName(*Pair.Key);
+					const TSharedPtr<FJsonObject> MetaDataObject = Pair.Value->AsObject();
+
+					if (MetaDataObject.IsValid())
+					{
+						bool bMaterial = false;
+						bool bMorphtarget = false;
+
+						const TSharedPtr<FJsonObject>* TypeObjectPtr = nullptr;
+						if (MetaDataObject->TryGetObjectField(TEXT("Type"), TypeObjectPtr) && (*TypeObjectPtr).IsValid())
+						{
+							(*TypeObjectPtr)->TryGetBoolField(TEXT("bMaterial"), bMaterial);
+							(*TypeObjectPtr)->TryGetBoolField(TEXT("bMorphtarget"), bMorphtarget);
+						}
+
+						Skeleton->AddCurveMetaData(CurveName);
+						Skeleton->AccumulateCurveMetaData(CurveName, bMaterial, bMorphtarget);
+					}
+				}
+			}
+		}
+	}
+
 	RebuildSkeleton(Skeleton);
 }
 

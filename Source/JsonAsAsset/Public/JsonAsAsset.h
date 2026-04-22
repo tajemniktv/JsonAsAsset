@@ -30,5 +30,5 @@ public:
     virtual void ShutdownModule() override;
 
 private:
-    UJsonAsAssetToolbar* Toolbar = nullptr;
+    TWeakObjectPtr<UJsonAsAssetToolbar> Toolbar;
 };

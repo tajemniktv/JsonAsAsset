@@ -7,6 +7,10 @@
 #include "Engine/Compatibility.h"
 
 bool CanImport(const FString& Type, const bool IsCloud, const UClass* Class) {
+	if (Type.Contains(TEXT("BlueprintGeneratedClass"))) {
+		return true;
+	}
+
 	if (IsCloud) {
 		if (!ImportTypes::Cloud::Allowed(Type)) {
 			return false;

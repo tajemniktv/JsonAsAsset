@@ -472,28 +472,34 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 		if (JsonValue->Type == EJson::String) {
 			FString EnumAsString = JsonValue->AsString();
 
-			check(ByteProperty->Enum);
-			int64 EnumerationValue = ByteProperty->Enum->GetValueByNameString(EnumAsString);
-
-			/* Somethings wrong!!! */
-			if (EnumerationValue == -1) {
-				UE_LOG(LogJsonAsAsset, Warning, TEXT("Invalid enum value for property '%s'!"), *Property->GetName());
-
-				UE_LOG(LogJsonAsAsset, Warning, TEXT("Enum name: %s"), *EnumAsString);
-				UE_LOG(LogJsonAsAsset, Warning, TEXT("Enum type: %s"), *ByteProperty->Enum->GetName());
-				UE_LOG(LogJsonAsAsset, Warning, TEXT("Available values:"));
-
-				for (int32 Index = 0; Index < ByteProperty->Enum->NumEnums() - 1; ++Index)
-				{
-					FString Name = ByteProperty->Enum->GetNameStringByIndex(Index);
-					int64 Value = ByteProperty->Enum->GetValueByIndex(Index);
-					UE_LOG(LogJsonAsAsset, Warning, TEXT("  [%d] %s = %lld"), Index, *Name, Value);
+			/* Some byte properties are plain bytes and do not have enum metadata. */
+			if (ByteProperty->Enum == nullptr) {
+				int64 ParsedAsNumber = 0;
+				if (!LexTryParseString(ParsedAsNumber, *EnumAsString)) {
+					UE_LOG(LogJsonAsAsset, Warning, TEXT("Byte property '%s' received non-numeric string '%s' with no enum metadata; defaulting to 0."),
+						*Property->GetName(), *EnumAsString);
+					ParsedAsNumber = 0;
 				}
 
-				EnumerationValue = 0;
+				ByteProperty->SetIntPropertyValue(OutValue, ParsedAsNumber);
+			} else {
+				int64 EnumerationValue = ByteProperty->Enum->GetValueByNameString(EnumAsString);
+				if (EnumerationValue == INDEX_NONE && EnumAsString.Contains(TEXT("::"))) {
+					FString ScopedEnumAsString = EnumAsString;
+					ScopedEnumAsString.Split(TEXT("::"), nullptr, &ScopedEnumAsString, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+					EnumerationValue = ByteProperty->Enum->GetValueByNameString(ScopedEnumAsString);
+				}
+
+				/* Something's wrong, fallback to first entry */
+				if (EnumerationValue == INDEX_NONE) {
+					UE_LOG(LogJsonAsAsset, Warning, TEXT("Invalid enum value for byte property '%s'!"), *Property->GetName());
+					UE_LOG(LogJsonAsAsset, Warning, TEXT("Enum name: %s"), *EnumAsString);
+					UE_LOG(LogJsonAsAsset, Warning, TEXT("Enum type: %s"), *ByteProperty->Enum->GetName());
+					EnumerationValue = 0;
+				}
+
+				ByteProperty->SetIntPropertyValue(OutValue, EnumerationValue);
 			}
-			
-			ByteProperty->SetIntPropertyValue(OutValue, EnumerationValue);
 		}
 		else {
 			/* Should be a number, set property value accordingly */
@@ -552,8 +558,15 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 			FString TextNamespace = Object->GetStringField(TEXT("Namespace"));
 			FString UniqueKey = Object->GetStringField(TEXT("Key"));
 			FString SourceString = Object->GetStringField(TEXT("SourceString"));
+			FString StringTableId;
+			Object->TryGetStringField(TEXT("TableId"), StringTableId);
 
-			TextProperty->SetPropertyValue(OutValue, FInternationalization::ForUseOnlyByLocMacroAndGraphNodeTextLiterals_CreateText(*SourceString, *TextNamespace, *UniqueKey));
+			if (!StringTableId.IsEmpty()) {
+				const FText TableText = FText::FromStringTable(FName(*StringTableId), UniqueKey);
+				TextProperty->SetPropertyValue(OutValue, TableText);
+			} else {
+				TextProperty->SetPropertyValue(OutValue, FInternationalization::ForUseOnlyByLocMacroAndGraphNodeTextLiterals_CreateText(*SourceString, *TextNamespace, *UniqueKey));
+			}
 		}
 	}
 	else if (CastField<const FFieldPathProperty>(Property)) {

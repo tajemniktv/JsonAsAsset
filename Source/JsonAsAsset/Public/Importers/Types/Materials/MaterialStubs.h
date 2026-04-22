@@ -245,7 +245,8 @@ inline void CreateStubs(IMaterialImporter* MaterialImporter) {
 					param->ParameterName = FName(paramName);
 					param->MaterialExpressionEditorX = x;
 					param->MaterialExpressionEditorY = y;
-					TObjectPtr<UTexture> tex = TSoftObjectPtr<UTexture>(FSoftObjectPath(FName(textureAssetPath), textureSubPath)).LoadSynchronous();
+					const FTopLevelAssetPath TopLevelAssetPath(textureAssetPath);
+					TObjectPtr<UTexture> tex = TSoftObjectPtr<UTexture>(FSoftObjectPath(TopLevelAssetPath, textureSubPath)).LoadSynchronous();
 					param->Texture = tex;
 					param->SamplerType = param->GetSamplerTypeForTexture(tex.Get());
 

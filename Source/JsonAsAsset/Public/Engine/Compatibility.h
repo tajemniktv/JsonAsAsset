@@ -13,6 +13,7 @@
 
 #include "Engine/TextureCube.h"
 #include "Engine/VolumeTexture.h"
+#include "UObject/UObjectIterator.h"
 
 #endif
 
@@ -221,8 +222,28 @@ inline UClass* FindClassByType(const FString& Type) {
 #else
 	UClass* Class = FindObject<UClass>(ANY_PACKAGE, *Type);
 #endif
+	if (Class != nullptr) {
+		return Class;
+	}
 
-	return Class;
+	/* FModel exports often provide short class names. Resolve by loaded class name/path as fallback. */
+	for (TObjectIterator<UClass> It; It; ++It) {
+		UClass* Candidate = *It;
+		if (!Candidate) {
+			continue;
+		}
+
+		if (Candidate->GetName().Equals(Type, ESearchCase::CaseSensitive)) {
+			return Candidate;
+		}
+
+		const FString CandidatePath = Candidate->GetPathName();
+		if (CandidatePath.EndsWith(TEXT(".") + Type, ESearchCase::CaseSensitive)) {
+			return Candidate;
+		}
+	}
+
+	return nullptr;
 }
 
 inline FTexturePlatformData* GetPlatformData(UTexture* Texture) {

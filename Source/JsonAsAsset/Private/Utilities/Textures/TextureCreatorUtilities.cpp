@@ -275,7 +275,7 @@ bool FTextureCreatorUtilities::DeserializeTexturePlatformData(UTexture* Texture,
 	uint8* DecompressedData = static_cast<uint8*>(FMemory::Malloc(Size));
 
 	if (IsOctetStreamEnabled()) {
-		GetDecompressedTextureData(Data.GetData(), DecompressedData, SizeX, SizeY, SizeZ, Size, TexturePlatformData.PixelFormat);
+		GetDecompressedTextureData(Data.GetData(), Data.Num(), DecompressedData, SizeX, SizeY, SizeZ, Size, TexturePlatformData.PixelFormat);
 	} else {
 		DecompressedData = Data.GetData();
 	}
@@ -301,8 +301,12 @@ bool FTextureCreatorUtilities::DeserializeTexturePlatformData(UTexture* Texture,
 	return false;
 }
 
-void FTextureCreatorUtilities::GetDecompressedTextureData(uint8* Data, uint8*& OutData, const int SizeX, const int SizeY, const int SizeZ, const int TotalSize, const EPixelFormat Format) {
+void FTextureCreatorUtilities::GetDecompressedTextureData(uint8* Data, int SourceDataSize, uint8*& OutData, const int SizeX, const int SizeY, const int SizeZ, const int TotalSize, const EPixelFormat Format) {
 #if PLATFORM_WINDOWS
+	if (Data == nullptr || OutData == nullptr || SourceDataSize <= 0 || SizeX <= 0 || SizeY <= 0 || SizeZ <= 0 || TotalSize <= 0) {
+		return;
+	}
+
 	/* NOTE: Not all formats are supported, feel free to add if needed. Formats may need other dependencies. */
 	switch (Format) {
 		case PF_BC7: {
@@ -398,9 +402,11 @@ void FTextureCreatorUtilities::GetDecompressedTextureData(uint8* Data, uint8*& O
 			Header.setHeight(SizeY);
 			Header.setDepth(SizeZ);
 			Header.setNormalFlag(Format == PF_BC5);
-			DecodeDDS(Data, SizeX, SizeY, SizeZ, Header, Image);
-
-			FMemory::Memcpy(OutData, Image.pixels(), TotalSize);
+			if (DecodeDDS(Data, SourceDataSize, SizeX, SizeY, SizeZ, Header, Image) && Image.pixels() != nullptr) {
+				FMemory::Memcpy(OutData, Image.pixels(), TotalSize);
+			} else {
+				FMemory::Memzero(OutData, TotalSize);
+			}
 		}
 		break;
 	}

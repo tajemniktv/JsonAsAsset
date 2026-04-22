@@ -85,12 +85,17 @@ private:
 	bool m_loading;
 };
 
-void DecodeDDS(const unsigned char* Data, int SizeX, int SizeY, int SizeZ, nv::DDSHeader& header, nv::Image& image) {
-	uint8 dummy[128];
-	NVTTStream* stream = new NVTTStream(dummy, sizeof(dummy), const_cast<unsigned char*>(Data), SizeX * SizeY * SizeZ * 4, true); // deleted in DirectDrawSurface destructor
+bool DecodeDDS(const unsigned char* Data, int SourceDataSize, int SizeX, int SizeY, int SizeZ, nv::DDSHeader& header, nv::Image& image) {
+	if (Data == nullptr || SourceDataSize <= 0 || SizeX <= 0 || SizeY <= 0 || SizeZ <= 0) {
+		return false;
+	}
+
+	uint8 dummy[128] = {};
+	NVTTStream* stream = new NVTTStream(dummy, sizeof(dummy), const_cast<unsigned char*>(Data), static_cast<uint>(SourceDataSize), true); // deleted in DirectDrawSurface destructor
 	nv::DirectDrawSurface dds(stream); // will try to read DDS header, it's zeroed
 	dds.header = header; // set real header contents
 	dds.mipmap(&image, 0, 0);
+	return image.pixels() != nullptr;
 }
 
 #endif // __linux__
