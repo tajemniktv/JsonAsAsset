@@ -1,6 +1,8 @@
 ﻿/* Copyright JsonAsAsset Contributors 2024-2026 */
 
 #include "Containers/Serializer.h"
+#include "Materials/Material.h"
+#include "Particles/ParticleSystem.h"
 
 USerializerContainer::USerializerContainer() {
 	CreateSerializer();
@@ -112,6 +114,9 @@ template<typename T>
 T* USerializerContainer::GetTypedAsset() const {
 	return AssetExport->Object ? Cast<T>(AssetExport->Object) : nullptr;
 }
+
+template UMaterial* USerializerContainer::GetTypedAsset<UMaterial>() const;
+template UParticleSystem* USerializerContainer::GetTypedAsset<UParticleSystem>() const;
 
 UObject* USerializerContainer::GetParent() const {
 	return AssetExport->Parent;

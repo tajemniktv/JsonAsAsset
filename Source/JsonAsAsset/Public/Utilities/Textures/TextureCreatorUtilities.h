@@ -11,8 +11,7 @@ inline bool ShouldUseOctetStream(
 {
 #if UE4_26_BELOW || UE5_5_BEYOND
 	return true;
-#endif
-
+#else
 #if PLATFORM_LINUX
 	return false;
 #endif
@@ -26,6 +25,7 @@ inline bool ShouldUseOctetStream(
 	}
 	
 	return IsVectorDisplacementMap;
+#endif
 }
 
 struct FTextureCreatorUtilities {

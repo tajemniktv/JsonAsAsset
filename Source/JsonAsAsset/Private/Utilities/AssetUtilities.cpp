@@ -7,6 +7,7 @@
 #include "Utilities/Textures/TextureCreatorUtilities.h"
 
 #include "Curves/CurveLinearColor.h"
+#include "Engine/FontFace.h"
 #include "Sound/SoundNode.h"
 #include "Engine/SubsurfaceProfile.h"
 #include "Materials/MaterialParameterCollection.h"
@@ -150,6 +151,7 @@ template bool FAssetUtilities::ConstructAsset<UMaterialFunctionInterface>(const 
 template bool FAssetUtilities::ConstructAsset<USoundNode>(const FString& Path, const FString& RealPath, const FString& Type, TObjectPtr<USoundNode>& OutObject, bool& bSuccess);
 template bool FAssetUtilities::ConstructAsset<UCurveLinearColor>(const FString& Path, const FString& RealPath, const FString& Type, TObjectPtr<UCurveLinearColor>& OutObject, bool& bSuccess);
 template bool FAssetUtilities::ConstructAsset<UTextureLightProfile>(const FString&, const FString&, const FString&, TObjectPtr<UTextureLightProfile>&, bool&);
+template bool FAssetUtilities::ConstructAsset<UFontFace>(const FString&, const FString&, const FString&, TObjectPtr<UFontFace>&, bool&);
 
 /* Importing assets from Cloud */
 template <typename T>
