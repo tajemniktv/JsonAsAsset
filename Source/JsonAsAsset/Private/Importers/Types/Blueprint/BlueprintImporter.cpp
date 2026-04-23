@@ -171,6 +171,19 @@ void IBlueprintImporter::ConstructWidgetTree() {
 	if (!GetAssetDataAsValue().Has("WidgetTree")) return;
 
 	UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint);
+	if (!WidgetBlueprint || !IsValid(WidgetBlueprint)) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("ConstructWidgetTree skipped for '%s': WidgetBlueprint is invalid."),
+		       *GetAssetName());
+		return;
+	}
+
+	if (!WidgetBlueprint->WidgetTree || !IsValid(WidgetBlueprint->WidgetTree)) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("ConstructWidgetTree skipped for '%s': WidgetTree is invalid."),
+		       *GetAssetName());
+		return;
+	}
 	
 	for (UWidget* Widget : Cast<UWidgetTreeAccessor>(WidgetBlueprint->WidgetTree)->GetWidgets()) {
 		MoveToTransientPackageAndRename(Widget);
@@ -185,13 +198,27 @@ void IBlueprintImporter::ConstructWidgetTree() {
 	WidgetBlueprint->Animations.Empty();
 	
 	FUObjectExport* ClassDefaultObjectExport = GetClassDefaultObject(GetContainer(), GetAssetDataAsValue());
+	if (!ClassDefaultObjectExport) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("ConstructWidgetTree for '%s': missing class default object export."),
+		       *GetAssetName());
+		return;
+	}
 	ClassDefaultObjectExport->Object = WidgetBlueprint;
 	SetAsset(WidgetBlueprint);
 
-	MoveToTransientPackageAndRename(WidgetBlueprint->WidgetTree->RootWidget);
+	if (WidgetBlueprint->WidgetTree->RootWidget) {
+		MoveToTransientPackageAndRename(WidgetBlueprint->WidgetTree->RootWidget);
+	}
 	WidgetBlueprint->WidgetTree->RootWidget = nullptr;
 	
 	FUObjectExport* Export = GetContainer()->GetExportByObjectPath(GetAssetDataAsValue().GetObject("WidgetTree"));
+	if (!Export) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("ConstructWidgetTree for '%s': missing WidgetTree export."),
+		       *GetAssetName());
+		return;
+	}
 	Export->Object = WidgetBlueprint->WidgetTree;
 	GetObjectSerializer()->SpawnExport(Export, true);
 
@@ -200,8 +227,14 @@ void IBlueprintImporter::ConstructWidgetTree() {
 	GetContainer()->ExportsLoop(GetAssetDataAsValue().GetArray("Animations"), [this, WidgetBlueprint](FUObjectExport* DirectExport) {
 		if (UObject* Object = GetObjectSerializer()->SpawnExport(DirectExport)) {
 			UWidgetAnimation* WidgetAnimation = Cast<UWidgetAnimation>(Object);
+			if (!WidgetAnimation || !IsValid(WidgetAnimation)) {
+				return;
+			}
 		
 			WidgetBlueprint->Animations.Add(WidgetAnimation);
+			if (!WidgetAnimation->MovieScene || !IsValid(WidgetAnimation->MovieScene)) {
+				return;
+			}
 
 			for (int32 Index = 0; Index < WidgetAnimation->MovieScene->GetPossessableCount(); ++Index) {
 				FMovieScenePossessable& Possessable = WidgetAnimation->MovieScene->GetPossessable(Index);
@@ -227,7 +260,10 @@ void IBlueprintImporter::ConstructWidgetTree() {
 
 					if (UMovieSceneWidgetMaterialTrack* MaterialTrack = Cast<UMovieSceneWidgetMaterialTrack>(Track))
 					{
-						MaterialTrack->SetDisplayName(FText::FromString(MaterialTrack->GetBrushPropertyNamePath()[0].ToString()));
+						const TArray<FName>& BrushPropertyPath = MaterialTrack->GetBrushPropertyNamePath();
+						if (BrushPropertyPath.Num() > 0) {
+							MaterialTrack->SetDisplayName(FText::FromString(BrushPropertyPath[0].ToString()));
+						}
 					}
 				}
 			}
