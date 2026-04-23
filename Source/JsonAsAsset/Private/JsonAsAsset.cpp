@@ -74,7 +74,10 @@ void FJsonAsAssetModule::ShutdownModule() {
 	FJsonAsAssetStyle::Shutdown();
 
 	if (Toolbar) {
-		Toolbar->RemoveFromRoot();
+		if (IsValid(Toolbar) && Toolbar->IsRooted()) {
+			Toolbar->RemoveFromRoot();
+		}
+
 		Toolbar = nullptr;
 	}
 }

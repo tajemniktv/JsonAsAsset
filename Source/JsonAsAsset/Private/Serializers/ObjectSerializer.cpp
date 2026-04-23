@@ -27,18 +27,18 @@ void UObjectSerializer::SetupExports(
 }
 
 /* New Generation */
-void UObjectSerializer::SpawnExport(FUObjectExport *Export,
-                                    const bool bImportInPlace) {
+UObject *UObjectSerializer::SpawnExport(FUObjectExport *Export,
+                                        const bool bOnlySerialize) {
   if (!Export || !Export->JsonObject.IsValid()) {
-    return;
+    return nullptr;
   }
 
-  if (!bImportInPlace && Export->Object != nullptr)
-    return;
+  if (!bOnlySerialize && Export->Object != nullptr)
+    return nullptr;
 
   const UClass *Class = Export->GetClass();
   if (!Class)
-    return;
+    return nullptr;
 
   const FString Outer =
       GetOuterFromObjectOuter(Export->JsonObject->TryGetField(TEXT("Outer")));
@@ -94,7 +94,7 @@ void UObjectSerializer::SpawnExport(FUObjectExport *Export,
   }
 
   if (!ObjectOuter)
-    return;
+    return nullptr;
 
   /* Default flags */
   EObjectFlags Flags = RF_Public | RF_Transactional;
@@ -115,7 +115,7 @@ void UObjectSerializer::SpawnExport(FUObjectExport *Export,
                TEXT("SpawnExport skipped '%s': existing object class mismatch (expected '%s', found '%s')."),
                *Export->GetName().ToString(), *Class->GetName(),
                *ExistingObject->GetClass()->GetName());
-        return;
+        return nullptr;
       }
     }
   }
@@ -139,6 +139,8 @@ void UObjectSerializer::SpawnExport(FUObjectExport *Export,
   if (Export->Object && Export->GetProperties().IsValid()) {
     DeserializeObjectProperties(Export->GetProperties(), Export->Object);
   }
+
+  return Export->Object;
 }
 
 void UObjectSerializer::SetPropertySerializer(

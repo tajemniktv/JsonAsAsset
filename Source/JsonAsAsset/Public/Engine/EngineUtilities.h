@@ -462,6 +462,14 @@ inline void MoveToTransientPackageAndRename(UObject *Object) {
   Object->SetFlags(RF_Transient);
 }
 
+inline void MoveToTransientPackagesAndRename(const TArray<UObject *> &Objects) {
+  for (UObject *Object : Objects) {
+    if (Object != nullptr) {
+      MoveToTransientPackageAndRename(Object);
+    }
+  }
+}
+
 inline EObjectFlags ParseObjectFlags(const FString &FlagsString) {
   static const TMap<FString, EObjectFlags> FlagMap = {
       {TEXT("RF_Public"), RF_Public},
