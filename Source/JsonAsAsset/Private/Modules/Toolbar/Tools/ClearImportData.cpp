@@ -39,12 +39,16 @@ void TToolClearImportData::Execute() {
 			AnimSequence->Modify();
 		}
 
-		if (const UStaticMesh* StaticMesh = Cast<UStaticMesh>(Asset)) {
-			StaticMesh->AssetImportData->SourceData.SourceFiles.Empty();
+		if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(Asset)) {
+			if (UAssetImportData* ImportData = StaticMesh->GetAssetImportData()) {
+				ImportData->SourceData.SourceFiles.Empty();
+			}
 		}
 
-		if (const UTexture* Texture = Cast<UTexture>(Asset)) {
-			Texture->AssetImportData->SourceData.SourceFiles.Empty();
+		if (UTexture* Texture = Cast<UTexture>(Asset)) {
+			if (UAssetImportData* ImportData = Texture->AssetImportData) {
+				ImportData->SourceData.SourceFiles.Empty();
+			}
 		}
 
 		if (UFontFace* FontFace = Cast<UFontFace>(Asset)) {

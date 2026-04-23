@@ -2,24 +2,27 @@
 
 #include "Importers/Types/Blueprint/AnimationBlueprintImporter.h"
 
-#include "AnimationStateMachineGraph.h"
-#include "AnimationStateMachineSchema.h"
 #include "AnimGraphNode_Base.h"
 #include "AnimGraphNode_SaveCachedPose.h"
 #include "AnimGraphNode_StateMachine.h"
 #include "AnimGraphNode_StateResult.h"
 #include "AnimGraphNode_UseCachedPose.h"
 #include "Animation/AnimBlueprint.h"
+#include "AnimationStateMachineGraph.h"
+#include "AnimationStateMachineSchema.h"
 #include "EdGraphSchema_K2.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 
-#include "Importers/Types/Blueprint/Utilities/AnimationBlueprintUtilities.h"
+
+#include "Engine/EngineUtilities.h"
 #include "Importers/Types/Blueprint/Utilities/AnimNodeLayoutUtillties.h"
+#include "Importers/Types/Blueprint/Utilities/AnimationBlueprintUtilities.h"
 #include "Importers/Types/Blueprint/Utilities/StateMachineUtilities.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Settings/Runtime.h"
 #include "Utilities/BlueprintUtilities.h"
-#include "Engine/EngineUtilities.h"
 #include "Utilities/JsonUtilities.h"
+
 
 #if ENGINE_UE5
 #include "UObject/UnrealTypePrivate.h"
@@ -27,878 +30,1144 @@
 
 bool GShowAnimationBlueprintImporterWarning = true;
 
-namespace
-{
-const FJBlueprintImportSettings& GetBlueprintImportSettings()
-{
-	return GetSettings()->BlueprintImport;
+namespace {
+const FJBlueprintImportSettings &GetBlueprintImportSettings() {
+  return GetSettings()->BlueprintImport;
 }
 
-bool IsStrictBlueprintImport()
-{
-	return GetBlueprintImportSettings().StrictMode;
+bool IsStrictBlueprintImport() {
+  return GetBlueprintImportSettings().StrictMode;
 }
 
-bool IsVerboseBlueprintImport()
-{
-	return GetBlueprintImportSettings().LogDetail == EJBlueprintLogDetail::Verbose;
+bool IsVerboseBlueprintImport() {
+  return GetBlueprintImportSettings().LogDetail ==
+         EJBlueprintLogDetail::Verbose;
 }
 
-bool ShouldCompileImmediately()
-{
-	return GetBlueprintImportSettings().CompilePolicy == EJBlueprintCompilePolicy::Immediate;
+bool ShouldCompileImmediately() {
+  return GetBlueprintImportSettings().CompilePolicy ==
+         EJBlueprintCompilePolicy::Immediate;
 }
 
-bool UseAnimBlueprintCompatibilityFallback()
-{
-	const UJsonAsAssetSettings* Settings = GetSettings();
-	return Settings && Settings->CompatibilityFallback.AnimBlueprintGeneratedClass;
+bool UseAnimBlueprintCompatibilityFallback() {
+  const UJsonAsAssetSettings *Settings = GetSettings();
+  if (Settings && Settings->CompatibilityFallback.AnimBlueprintGeneratedClass) {
+    return true;
+  }
+
+  return GJsonAsAssetRuntime.IsBetterMartPresetActive();
 }
 
-bool IsAnimBlueprintValid(const UAnimBlueprint* Blueprint)
-{
-	return Blueprint != nullptr && Blueprint->GeneratedClass != nullptr && Blueprint->SkeletonGeneratedClass != nullptr;
+bool IsAnimBlueprintValid(const UAnimBlueprint *Blueprint) {
+  return Blueprint != nullptr && Blueprint->GeneratedClass != nullptr &&
+         Blueprint->SkeletonGeneratedClass != nullptr;
 }
 
-void ResetGraphNodes(UEdGraph* Graph)
-{
-	if (!Graph) {
-		return;
-	}
+void ResetGraphNodes(UEdGraph *Graph) {
+  if (!Graph) {
+    return;
+  }
 
-	for (UEdGraphNode* Node : Graph->Nodes) {
-		if (Node) {
-			Node->BreakAllNodeLinks();
-			Node->ConditionalBeginDestroy();
-		}
-	}
+  for (UEdGraphNode *Node : Graph->Nodes) {
+    if (Node) {
+      Node->BreakAllNodeLinks();
+      Node->ConditionalBeginDestroy();
+    }
+  }
 
-	Graph->Nodes.Empty();
-	Graph->SubGraphs.Empty();
+  Graph->Nodes.Empty();
+  Graph->SubGraphs.Empty();
 }
-}
+} // namespace
 
 bool IAnimationBlueprintImporter::Import() {
-	if (GShowAnimationBlueprintImporterWarning) {
-		SpawnPrompt("Preface Warning", "None of this is final, this is completely a work in progress with flaws. None of it is perfect. If you find a issue, fix it.\n\nTo remove this warning, go to AnimationBlueprintImporter.cpp and set GShowAnimationBlueprintImporterWarning to false.");
-		GShowAnimationBlueprintImporterWarning = false;
-	}
-	
-	AnimBlueprint = GetSelectedAsset<UAnimBlueprint>(true);
-	if (!AnimBlueprint) {
-		const TSharedPtr<FJsonObject> SuperStruct = GetAssetData()->GetObjectField(TEXT("SuperStruct"));
-		UClass* ParentClass = LoadClass(SuperStruct);
+  if (GShowAnimationBlueprintImporterWarning) {
+    SpawnPrompt(
+        "Preface Warning",
+        "None of this is final, this is completely a work in progress with "
+        "flaws. None of it is perfect. If you find a issue, fix it.\n\nTo "
+        "remove this warning, go to AnimationBlueprintImporter.cpp and set "
+        "GShowAnimationBlueprintImporterWarning to false.");
+    GShowAnimationBlueprintImporterWarning = false;
+  }
 
-		AnimBlueprint = CreateAnimBlueprint(ParentClass);
-	}
-
-	if (!AnimBlueprint) return false;
-
-	NodesKeys.Empty();
-	ReversedNodesKeys.Empty();
-	BakedStateMachines.Empty();
-	SyncGroupNames.Empty();
-
-	if (RootAnimNodeContainer) {
-		delete RootAnimNodeContainer;
-	}
-	RootAnimNodeContainer = new FUObjectExportContainer();
-
-	const TSharedPtr<FJsonObject> RootAnimNodeDefaults = GetExportStartingWith("Default__", "Name", AssetContainer->JsonObjects);
-	if (!RootAnimNodeDefaults.IsValid()) {
-		UE_LOG(LogJsonAsAsset, Warning, TEXT("AnimBlueprint '%s' has no Default__ export; skipping import."), *GetAssetName());
-		return !IsStrictBlueprintImport();
-	}
-	
-	RootAnimNodeProperties = RootAnimNodeDefaults->GetObjectField(TEXT("Properties"));
-	if (!RootAnimNodeProperties.IsValid()) {
-		UE_LOG(LogJsonAsAsset, Warning, TEXT("AnimBlueprint '%s' has no default properties object; skipping graph import."), *GetAssetName());
-		return !IsStrictBlueprintImport();
-	}
-
-	const UBlueprintGeneratedClass* GeneratedClass = Cast<UBlueprintGeneratedClass>(AnimBlueprint->GeneratedClass);
-	if (!GeneratedClass) {
-		UE_LOG(LogJsonAsAsset, Error, TEXT("AnimBlueprint '%s' missing generated class"), *GetAssetName());
-		return false;
-	}
-	GetObjectSerializer()->Exports = AssetContainer->JsonObjects;
-	GetObjectSerializer()->DeserializeObjectProperties(RemovePropertiesShared(RootAnimNodeProperties, {
-		"RootComponent"
-	}), GeneratedClass->GetDefaultObject());
-
-	GetObjectSerializer()->DeserializeObjectProperties(RemovePropertiesShared(GetAssetData(), {
-		"FuncMap",
-		"bCooked",
-		"Children",
-		"RootAnimNodeIndex",
-		"UberGraphFunction",
-		"UberGraphFramePointerProperty",
-		"SuperStruct"
-	}), AnimBlueprint);
-
-	/* Newer Unreal Engine versions use CopyRecords and SerializedSparseClassData */
-	if (RootAnimNodeDefaults->HasField(TEXT("SerializedSparseClassData"))) {
-		SerializedSparseClassData = RootAnimNodeDefaults->GetObjectField(TEXT("SerializedSparseClassData"));
-	}
-
-	/* Array of sync group names cached to use at later points of importing */
-	if (GetAssetData()->HasField(TEXT("SyncGroupNames"))) {
-		for (const auto& SyncGroupNameValue : GetAssetData()->GetArrayField(TEXT("SyncGroupNames"))) {
-			SyncGroupNames.Add(SyncGroupNameValue->AsString());
-		}
-	}
-
-	/* Filter AnimNodeProperties ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	FilterAnimGraphNodeProperties(RootAnimNodeProperties);
-	ProcessEvaluateGraphExposedInputs(RootAnimNodeProperties);
-
-	/* Parse LinkIDs to proper Node IDs ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	RootAnimNodeProperties->Values.GetKeys(NodesKeys);
-	
-	ReversedNodesKeys = NodesKeys;
-	Algo::Reverse(ReversedNodesKeys);
-
-	for (const FString& Key : NodesKeys) {
-		TSharedPtr<FJsonValue> NodeValue = RootAnimNodeProperties->Values.FindChecked(Key);
-		if (!NodeValue.IsValid()) continue;
-		
-		ReplaceLinkID(NodeValue, NodesKeys);
-		RootAnimNodeProperties->Values[Key] = NodeValue;
-	}
-
-	/* Sets "State" and "Machine" for each state result */
-	if (GetAssetData()->HasField(TEXT("BakedStateMachines"))) {
-		BakedStateMachines = GetAssetData()->GetArrayField(TEXT("BakedStateMachines"));
-    
-		for (const TSharedPtr<FJsonValue>& MachineValue : BakedStateMachines) {
-			const TSharedPtr<FJsonObject> MachineObject = MachineValue->AsObject();
-			const TArray<TSharedPtr<FJsonValue>> States = MachineObject->GetArrayField(TEXT("States"));
-			const FString MachineName = MachineObject->GetStringField(TEXT("MachineName"));
-        
-			/* Loop through each state */
-			for (const TSharedPtr<FJsonValue>& StateValue : States) {
-				const TSharedPtr<FJsonObject> StateObject = StateValue->AsObject();
-				const int32 StateRootNodeIndex = StateObject->GetIntegerField(TEXT("StateRootNodeIndex"));
-            
-				if (StateRootNodeIndex == -1 || !ReversedNodesKeys.IsValidIndex(StateRootNodeIndex)) {
-					continue;
-				}
-            
-				const FString StartKey = ReversedNodesKeys[StateRootNodeIndex];
-				HarvestAndTagConnectedStateMachineNodes(StartKey, StateObject->GetStringField(TEXT("StateName")), MachineName, RootAnimNodeProperties->Values);
-			}
-		}
-	}
-
-	/* Separate main graph nodes (without "State" and "Machine") into RootGraphAnimProperties ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	const TSharedPtr<FJsonObject> RootGraphAnimProperties = MakeShared<FJsonObject>(); {
-		for (const FString& Key : NodesKeys) {
-			const TSharedPtr<FJsonValue> NodeValue = RootAnimNodeProperties->Values.FindChecked(Key);
-		
-			if (NodeValue->Type == EJson::Object) {
-				const TSharedPtr<FJsonObject> NodeObject = NodeValue->AsObject();
-			
-				if (!NodeObject->HasField(TEXT("State")) && !NodeObject->HasField(TEXT("Machine"))) {
-					RootGraphAnimProperties->SetObjectField(Key, NodeObject);
-				}
-			}
-		}
-	}
-
-	UEdGraph* AnimGraph = FindAnimGraph(AnimBlueprint);
-
-	if (!AnimGraph) {
-		AnimGraph = FBlueprintEditorUtils::CreateNewGraph(
-			AnimBlueprint,
-			TEXT("AnimGraph"),
-			UEdGraph::StaticClass(),
-			UEdGraphSchema_K2::StaticClass()
-		);
-
-		if (AnimGraph) {
-			AnimBlueprint->FunctionGraphs.Add(AnimGraph);
-		}
-	}
-
-	if (AnimGraph) {
-		ResetGraphNodes(AnimGraph);
-	} else {
-		UE_LOG(LogJsonAsAsset, Warning, TEXT("AnimBlueprint '%s' has no AnimGraph and creation failed."), *GetAssetName());
-		if (IsStrictBlueprintImport() && !UseAnimBlueprintCompatibilityFallback()) {
-			return false;
-		}
-	}
-
-	CreateGraph(RootGraphAnimProperties, AnimGraph, RootAnimNodeContainer);
-
-	if (ShouldCompileImmediately()) {
-		FKismetEditorUtilities::CompileBlueprint(
-			AnimBlueprint,
-			EBlueprintCompileOptions::None
-		);
-	} else {
-		UE_LOG(LogJsonAsAsset, Warning, TEXT("Skipping immediate compile for AnimBlueprint '%s' due to BlueprintImport.CompilePolicy=%s"),
-			*GetAssetName(),
-			*StaticEnum<EJBlueprintCompilePolicy>()->GetNameStringByValue(static_cast<int64>(GetBlueprintImportSettings().CompilePolicy)));
-	}
-	
-	return OnAssetCreation(AnimBlueprint);
-}
-
-UAnimBlueprint* IAnimationBlueprintImporter::CreateAnimBlueprint(UClass* ParentClass) {
-	if (!ParentClass || !GetPackage()) {
-		return nullptr;
-	}
-
-	UBlueprint* ExistingBlueprint = FindObject<UBlueprint>(GetPackage(), *GetAssetName());
-	if (!ExistingBlueprint) {
-		const FString ExistingObjectPath = GetPackage()->GetPathName() + TEXT(".") + GetAssetName();
-		ExistingBlueprint = LoadObject<UBlueprint>(nullptr, *ExistingObjectPath);
-	}
-
-	const EJBlueprintReimportPolicy Policy = GetBlueprintImportSettings().ReimportPolicy;
-	if (ExistingBlueprint && Policy == EJBlueprintReimportPolicy::AlwaysRecreate) {
-		MoveToTransientPackageAndRename(ExistingBlueprint);
-		ExistingBlueprint = nullptr;
-	}
-
-	// Avoid UnrealEd assert in FKismetEditorUtilities::CreateBlueprint when an object with this name already exists in the package.
-	if (ExistingBlueprint) {
-		if (UAnimBlueprint* ExistingAnimBlueprint = Cast<UAnimBlueprint>(ExistingBlueprint)) {
-			if (Policy == EJBlueprintReimportPolicy::RecreateInvalid && !IsAnimBlueprintValid(ExistingAnimBlueprint)) {
-				MoveToTransientPackageAndRename(ExistingAnimBlueprint);
-			} else if (Policy == EJBlueprintReimportPolicy::ReuseValid && !IsAnimBlueprintValid(ExistingAnimBlueprint)) {
-				if (IsStrictBlueprintImport()) {
-					UE_LOG(LogJsonAsAsset, Error, TEXT("ReuseValid policy prevented recreation of invalid AnimBlueprint '%s'"), *GetAssetName());
-					return nullptr;
-				}
-				MoveToTransientPackageAndRename(ExistingAnimBlueprint);
-			} else {
-				return Cast<UAnimBlueprint>(CreateAsset(ExistingAnimBlueprint));
-			}
-		}
-		else {
-			UE_LOG(LogJsonAsAsset, Error, TEXT("Cannot create AnimBlueprint '%s' in '%s': existing Blueprint is not UAnimBlueprint."),
-				*GetAssetName(), *GetPackage()->GetPathName());
-			return nullptr;
-		}
-	}
-
-	const EBlueprintType BlueprintType = GetBlueprintType(ParentClass);
-
-	if (UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(ParentClass, GetPackage(), FName(*GetAssetName()), BlueprintType, UAnimBlueprint::StaticClass(), UAnimBlueprintGeneratedClass::StaticClass())) {
-		return Cast<UAnimBlueprint>(CreateAsset(Blueprint));
-	}
-
-	return nullptr;
-}
-
-void IAnimationBlueprintImporter::CreateGraph(const TSharedPtr<FJsonObject>& AnimNodeProperties, UEdGraph* AnimGraph, FUObjectExportContainer* Container) {
-	if (!AnimGraph || !Container || !AnimNodeProperties.IsValid()) {
-		return;
-	}
-
-	/* Remove all pre-existing nodes */
-	ResetGraphNodes(AnimGraph);
-	
-	CreateAnimGraphNodes(AnimGraph, AnimNodeProperties, *Container);
-	AddNodesToGraph(AnimGraph, Container);
-
-	HandleNodeDeserialization(Container);
-	ConnectAnimGraphNodes(Container, AnimGraph);
-	AutoLayoutAnimGraphNodes(Container->Exports);
-
-	for (const FUObjectExport* ExportNode : Container->Exports) {
-		if (!ExportNode || !ExportNode->JsonObject.IsValid()) {
-			continue;
-		}
-
-		const TSharedPtr<FJsonObject> ExportJsonObject = ExportNode->JsonObject;
-		
-		if (UAnimGraphNode_StateMachine* StateMachine = Cast<UAnimGraphNode_StateMachine>(ExportNode->Object)) {
-			UAnimationStateMachineGraph* EditorStateMachineGraph = CastChecked<UAnimationStateMachineGraph>(FBlueprintEditorUtils::CreateNewGraph(StateMachine, NAME_None, UAnimationStateMachineGraph::StaticClass(), UAnimationStateMachineSchema::StaticClass()));
-			EditorStateMachineGraph->OwnerAnimGraphNode = StateMachine;
-
-			if (!ExportJsonObject->HasField(TEXT("StateMachineIndexInClass"))) {
-				if (IsVerboseBlueprintImport()) {
-					UE_LOG(LogJsonAsAsset, Warning, TEXT("State machine node '%s' has no StateMachineIndexInClass"), *ExportNode->GetName().ToString());
-				}
-				continue;
-			}
-
-			const int32 StateMachineIndex = ExportJsonObject->GetIntegerField(TEXT("StateMachineIndexInClass"));
-			if (!BakedStateMachines.IsValidIndex(StateMachineIndex) || !BakedStateMachines[StateMachineIndex].IsValid()) {
-				UE_LOG(LogJsonAsAsset, Warning, TEXT("State machine index %d out of bounds for '%s'"), StateMachineIndex, *GetAssetName());
-				if (IsStrictBlueprintImport()) {
-					return;
-				}
-				continue;
-			}
-
-			const TSharedPtr<FJsonObject> StateMachineObject = BakedStateMachines[StateMachineIndex]->AsObject();
-			if (!StateMachineObject.IsValid()) {
-				continue;
-			}
-					
-			FString MachineName = StateMachineObject->GetStringField(TEXT("MachineName"));
-			EditorStateMachineGraph->Rename(*MachineName);
-
-			const UEdGraphSchema* Schema = EditorStateMachineGraph->GetSchema();
-			Schema->CreateDefaultNodesForGraph(*EditorStateMachineGraph);
-
-			UEdGraph* ParentGraph = StateMachine->GetGraph();
-	
-			if(ParentGraph->SubGraphs.Find(EditorStateMachineGraph) == INDEX_NONE) {
-				ParentGraph->Modify();
-				ParentGraph->SubGraphs.Add(EditorStateMachineGraph);
-			}
-
-			StateMachine->EditorStateMachineGraph = EditorStateMachineGraph;
-			CreateStateMachineGraph(EditorStateMachineGraph, StateMachineObject, GetObjectSerializer(), RootAnimNodeContainer, ReversedNodesKeys, this, AnimBlueprint);
-
-			/* Add nodes to graph */
-			if (!StateMachineObject->HasField(TEXT("States"))) continue;
-
-			TArray<TSharedPtr<FJsonValue>> States = StateMachineObject->GetArrayField(TEXT("States"));
-
-			for (const TSharedPtr<FJsonValue>& StateValue : States) {
-				const TSharedPtr<FJsonObject> StateObject = StateValue->AsObject();
-				FString StateName = StateObject->GetStringField(TEXT("StateName"));
-
-				UAnimationStateGraph* Graph = nullptr;
-
-				for (UEdGraph* SubGraph : EditorStateMachineGraph->SubGraphs) {
-					if (SubGraph->GetName() == StateName) {
-						Graph = Cast<UAnimationStateGraph>(SubGraph);
-					}
-				}
-
-				TSharedPtr<FJsonObject> StateMachineAnimNodeProperties = MakeShared<FJsonObject>();
-
-				for (const auto& Pair : RootAnimNodeProperties->Values) {
-					const  FString Key = Pair.Key;
-					const TSharedPtr<FJsonObject> Value = Pair.Value->AsObject();
-
-					if (!Value.IsValid()) continue;
-
-					if (Value->HasField(TEXT("State")) && Value->HasField(TEXT("Machine"))) {
-						const FString NodeStateName = Value->GetStringField(TEXT("State"));
-						const FString NodeMachineName = Value->GetStringField(TEXT("Machine"));
-
-						if (StateName == NodeStateName && NodeMachineName == MachineName) {
-							StateMachineAnimNodeProperties->SetObjectField(Key, Value);
-						}
-					}
-				}
-
-				if (Graph) {
-					FUObjectExportContainer* StateMachineContainer = new FUObjectExportContainer();
-					CreateGraph(StateMachineAnimNodeProperties, Graph, StateMachineContainer);
-
-					if (Graph->MyResultNode) {
-						Graph->MyResultNode->BreakAllNodeLinks();
-						Graph->RemoveNode(Graph->MyResultNode);
-						Graph->MyResultNode->ConditionalBeginDestroy();
-						Graph->MyResultNode = nullptr;
-					}
-
-					for (const FUObjectExport* StateMachineExport : StateMachineContainer->Exports) {
-						if (UAnimGraphNode_StateResult* StateResult = Cast<UAnimGraphNode_StateResult>(StateMachineExport->Object)) {
-							Graph->MyResultNode = StateResult;
-						}
-					}
-
-					delete StateMachineContainer;
-				}
-			}
-		}
-	}
-}
-
-void inline LinkPoseInputPin(const FString& PinName, UAnimGraphNode_Base* Node, UAnimGraphNode_Base* TargetNode, UEdGraph* AnimGraph) {
-	UEdGraphPin* InputPin = Node->FindPin(PinName, EGPD_Input);
-	UEdGraphPin* OutputPin = GetFirstOutputPin(TargetNode);
-	
-	if (InputPin && OutputPin) {
-		InputPin->MakeLinkTo(OutputPin);
-		InputPin->DefaultValue.Reset();
-		
-		Node->Modify();
-		TargetNode->Modify();
-		AnimGraph->Modify();
-	}
-}
-
-void IAnimationBlueprintImporter::UpdateBlendListByEnumVisibleEntries(FUObjectExport* NodeExport, FUObjectExportContainer* Container, UEdGraph* AnimGraph) {
-	TSharedPtr<FJsonObject> NodeJsonObject = NodeExport->JsonObject;
-	UAnimGraphNode_BlendListByEnum* BlendListByEnum = Cast<UAnimGraphNode_BlendListByEnum>(NodeExport->Object);
-	
-    if (!BlendListByEnum || !NodeJsonObject) {
-        return;
+  AnimBlueprint = GetSelectedAsset<UAnimBlueprint>(true);
+  if (!AnimBlueprint) {
+    if (!GetAssetData()->HasField(TEXT("SuperStruct"))) {
+      UE_LOG(LogJsonAsAsset, Error,
+             TEXT("AnimBlueprint '%s' is missing SuperStruct metadata."),
+             *GetAssetName());
+      return !IsStrictBlueprintImport();
     }
 
-	/* Get the BoundEnum set before in the BlendListByEnum node */
-    const UEnum* BoundEnum = BlendListByEnum->GetEnum();
-    if (!BoundEnum) {
-        return;
+    const TSharedPtr<FJsonObject> SuperStruct =
+        GetAssetData()->GetObjectField(TEXT("SuperStruct"));
+    UClass *ParentClass = LoadClass(SuperStruct);
+
+    AnimBlueprint = CreateAnimBlueprint(ParentClass);
+  }
+
+  if (!AnimBlueprint)
+    return false;
+
+  NodesKeys.Empty();
+  ReversedNodesKeys.Empty();
+  BakedStateMachines.Empty();
+  SyncGroupNames.Empty();
+
+  if (RootAnimNodeContainer) {
+    delete RootAnimNodeContainer;
+  }
+  RootAnimNodeContainer = new FUObjectExportContainer();
+
+  const TSharedPtr<FJsonObject> RootAnimNodeDefaults =
+      GetExportStartingWith("Default__", "Name", AssetContainer->JsonObjects);
+  if (!RootAnimNodeDefaults.IsValid()) {
+    UE_LOG(LogJsonAsAsset, Warning,
+           TEXT("AnimBlueprint '%s' has no Default__ export; skipping import."),
+           *GetAssetName());
+    return !IsStrictBlueprintImport();
+  }
+
+  if (!RootAnimNodeDefaults->HasField(TEXT("Properties"))) {
+    UE_LOG(LogJsonAsAsset, Warning,
+           TEXT("AnimBlueprint '%s' default export is missing Properties; skipping graph import."),
+           *GetAssetName());
+    return !IsStrictBlueprintImport();
+  }
+
+  RootAnimNodeProperties = RootAnimNodeDefaults->GetObjectField(TEXT("Properties"));
+  if (!RootAnimNodeProperties.IsValid()) {
+    UE_LOG(LogJsonAsAsset, Warning,
+           TEXT("AnimBlueprint '%s' has no default properties object; skipping "
+                "graph import."),
+           *GetAssetName());
+    return !IsStrictBlueprintImport();
+  }
+
+  const UBlueprintGeneratedClass *GeneratedClass =
+      Cast<UBlueprintGeneratedClass>(AnimBlueprint->GeneratedClass);
+  if (!GeneratedClass) {
+    UE_LOG(LogJsonAsAsset, Error,
+           TEXT("AnimBlueprint '%s' missing generated class"), *GetAssetName());
+    return false;
+  }
+  GetObjectSerializer()->Exports = AssetContainer->JsonObjects;
+  GetObjectSerializer()->DeserializeObjectProperties(
+      RemovePropertiesShared(RootAnimNodeProperties, {"RootComponent"}),
+      GeneratedClass->GetDefaultObject());
+
+  GetObjectSerializer()->DeserializeObjectProperties(
+      RemovePropertiesShared(GetAssetData(),
+                             {"FuncMap", "bCooked", "Children",
+                              "RootAnimNodeIndex", "UberGraphFunction",
+                              "UberGraphFramePointerProperty", "SuperStruct"}),
+      AnimBlueprint);
+
+  /* Newer Unreal Engine versions use CopyRecords and SerializedSparseClassData
+   */
+  if (RootAnimNodeDefaults->HasField(TEXT("SerializedSparseClassData"))) {
+    SerializedSparseClassData =
+        RootAnimNodeDefaults->GetObjectField(TEXT("SerializedSparseClassData"));
+  }
+
+  /* Array of sync group names cached to use at later points of importing */
+  if (GetAssetData()->HasField(TEXT("SyncGroupNames"))) {
+    for (const auto &SyncGroupNameValue :
+         GetAssetData()->GetArrayField(TEXT("SyncGroupNames"))) {
+      SyncGroupNames.Add(SyncGroupNameValue->AsString());
+    }
+  }
+
+  /* Filter AnimNodeProperties
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+  FilterAnimGraphNodeProperties(RootAnimNodeProperties);
+  ProcessEvaluateGraphExposedInputs(RootAnimNodeProperties);
+
+  /* Parse LinkIDs to proper Node IDs
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+  RootAnimNodeProperties->Values.GetKeys(NodesKeys);
+
+  ReversedNodesKeys = NodesKeys;
+  Algo::Reverse(ReversedNodesKeys);
+
+  for (const FString &Key : NodesKeys) {
+    TSharedPtr<FJsonValue> *NodeValuePtr =
+        RootAnimNodeProperties->Values.Find(Key);
+    if (NodeValuePtr == nullptr || !NodeValuePtr->IsValid()) {
+      UE_LOG(LogJsonAsAsset, Warning,
+             TEXT("AnimBlueprint '%s': missing root node property '%s', "
+                  "skipping link replacement."),
+             *GetAssetName(), *Key);
+      continue;
     }
 
-	TArray<TSharedPtr<FJsonValue>> EnumToPoseIndexArray = NodeJsonObject->GetArrayField(TEXT("EnumToPoseIndex"));
+    TSharedPtr<FJsonValue> NodeValue = *NodeValuePtr;
 
-	/* Create VisibleEnumEntries array using the enum */
-	TArray<FName> VisibleEnumEntries;
+    ReplaceLinkID(NodeValue, NodesKeys);
+    RootAnimNodeProperties->Values[Key] = NodeValue;
+  }
 
-    for (int32 i = 0; i < EnumToPoseIndexArray.Num(); i++) {
-        const int32 Value = static_cast<int32>(EnumToPoseIndexArray[i]->AsNumber());
-        
-        if (Value != 0) {
-            if (BoundEnum->NumEnums() > i) {
-                FString EnumEntryName = BoundEnum->GetNameByIndex(i).ToString();
-                if (EnumEntryName.Contains("::")) {
-                    EnumEntryName.Split("::", nullptr, &EnumEntryName);
-                }
+  /* Sets "State" and "Machine" for each state result */
+  if (GetAssetData()->HasTypedField<EJson::Array>(TEXT("BakedStateMachines"))) {
+    BakedStateMachines =
+        GetAssetData()->GetArrayField(TEXT("BakedStateMachines"));
 
-                VisibleEnumEntries.Add(FName(*EnumEntryName));
-            }
+    for (const TSharedPtr<FJsonValue> &MachineValue : BakedStateMachines) {
+      if (!MachineValue.IsValid() || MachineValue->Type != EJson::Object ||
+          !MachineValue->AsObject().IsValid()) {
+        UE_LOG(LogJsonAsAsset, Warning,
+               TEXT("AnimBlueprint '%s': invalid baked state machine entry, "
+                    "skipping."),
+               *GetAssetName());
+        continue;
+      }
+
+      const TSharedPtr<FJsonObject> MachineObject = MachineValue->AsObject();
+      if (!MachineObject.IsValid()) {
+        continue;
+      }
+
+      const TArray<TSharedPtr<FJsonValue>> States =
+          MachineObject->GetArrayField(TEXT("States"));
+      const FString MachineName =
+          MachineObject->GetStringField(TEXT("MachineName"));
+
+      /* Loop through each state */
+      for (const TSharedPtr<FJsonValue> &StateValue : States) {
+        if (!StateValue.IsValid() || StateValue->Type != EJson::Object ||
+            !StateValue->AsObject().IsValid()) {
+          UE_LOG(LogJsonAsAsset, Warning,
+                 TEXT("AnimBlueprint '%s': invalid state entry in machine "
+                      "'%s', skipping."),
+                 *GetAssetName(), *MachineName);
+          continue;
         }
-    }
-	
-    if (const FArrayProperty* VisEnumArrayProp = FindFProperty<FArrayProperty>(BlendListByEnum->GetClass(), TEXT("VisibleEnumEntries"))) {
-        const void* ArrayPtr = VisEnumArrayProp->ContainerPtrToValuePtr<void>(BlendListByEnum);
-        FScriptArrayHelper ArrayHelper(VisEnumArrayProp, ArrayPtr);
-    	
-        ArrayHelper.Resize(0);
-    	
-        const FNameProperty* NameProp = CastField<FNameProperty>(VisEnumArrayProp->Inner);
-        if (!NameProp) {
-            return;
+
+        const TSharedPtr<FJsonObject> StateObject = StateValue->AsObject();
+        if (!StateObject.IsValid() ||
+            !StateObject->HasField(TEXT("StateRootNodeIndex"))) {
+          continue;
         }
-    	
-        for (const FName& Entry : VisibleEnumEntries) {
-            const int32 NewIdx = ArrayHelper.AddValue();
-            void* ElemPtr = ArrayHelper.GetRawPtr(NewIdx);
-        	
-            NameProp->SetPropertyValue(ElemPtr, Entry);
+
+        const int32 StateRootNodeIndex =
+            StateObject->GetIntegerField(TEXT("StateRootNodeIndex"));
+
+        if (StateRootNodeIndex == -1 ||
+            !ReversedNodesKeys.IsValidIndex(StateRootNodeIndex)) {
+          continue;
         }
+
+        const FString StartKey = ReversedNodesKeys[StateRootNodeIndex];
+        HarvestAndTagConnectedStateMachineNodes(
+            StartKey, StateObject->GetStringField(TEXT("StateName")),
+            MachineName, RootAnimNodeProperties->Values);
+      }
     }
+  }
 
-	BlendListByEnum->ReconstructNode();
+  /* Separate main graph nodes (without "State" and "Machine") into
+   * RootGraphAnimProperties ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+  const TSharedPtr<FJsonObject> RootGraphAnimProperties =
+      MakeShared<FJsonObject>();
+  {
+    for (const FString &Key : NodesKeys) {
+      const TSharedPtr<FJsonValue> *NodeValuePtr =
+          RootAnimNodeProperties->Values.Find(Key);
+      if (NodeValuePtr == nullptr || !NodeValuePtr->IsValid()) {
+        UE_LOG(
+            LogJsonAsAsset, Warning,
+            TEXT("AnimBlueprint '%s': missing graph property '%s', skipping."),
+            *GetAssetName(), *Key);
+        continue;
+      }
 
-	TArray<TSharedPtr<FJsonValue>> BlendPoseArray = NodeJsonObject->GetArrayField(TEXT("BlendPose"));
+      const TSharedPtr<FJsonValue> NodeValue = *NodeValuePtr;
 
-	int BlendPoseIndex = 0;
-	if (BlendPoseArray.IsValidIndex(0)) {
-		FString LinkID = BlendPoseArray[0]->AsObject()->GetStringField(TEXT("LinkID"));
-		const FString IndexedPinName = FString::Printf(TEXT("BlendPose_%d"), 0);
+      if (NodeValue->Type == EJson::Object) {
+        const TSharedPtr<FJsonObject> NodeObject = NodeValue->AsObject();
 
-		FUObjectExport* TargetNodeExport = Container->Find(LinkID);
-		if (!TargetNodeExport || !TargetNodeExport->IsJsonAndObjectValid()) {
-			return;
-		}
+        if (!NodeObject->HasField(TEXT("State")) &&
+            !NodeObject->HasField(TEXT("Machine"))) {
+          RootGraphAnimProperties->SetObjectField(Key, NodeObject);
+        }
+      }
+    }
+  }
 
-		UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(TargetNodeExport->Object);
+  UEdGraph *AnimGraph = FindAnimGraph(AnimBlueprint);
 
-		LinkPoseInputPin(IndexedPinName, BlendListByEnum, TargetNode, AnimGraph);
+  if (!AnimGraph) {
+    AnimGraph = FBlueprintEditorUtils::CreateNewGraph(
+        AnimBlueprint, TEXT("AnimGraph"), UEdGraph::StaticClass(),
+        UEdGraphSchema_K2::StaticClass());
 
-		BlendPoseIndex++;
-	}
+    if (AnimGraph) {
+      AnimBlueprint->FunctionGraphs.Add(AnimGraph);
+    }
+  }
 
-	/* Map poses corresponding to the bound enum */
-	for (int32 EnumIndex = 0; EnumIndex < BoundEnum->NumEnums() - 1; ++EnumIndex) {
-		if (EnumIndex < EnumToPoseIndexArray.Num()) {
-			const int PoseIndex = EnumToPoseIndexArray[EnumIndex]->AsNumber();
+  if (AnimGraph) {
+    ResetGraphNodes(AnimGraph);
+  } else {
+    UE_LOG(LogJsonAsAsset, Warning,
+           TEXT("AnimBlueprint '%s' has no AnimGraph and creation failed."),
+           *GetAssetName());
+    if (IsStrictBlueprintImport() && !UseAnimBlueprintCompatibilityFallback()) {
+      return false;
+    }
+  }
 
-			if (PoseIndex == 0) continue;
+  if (AnimGraph) {
+    CreateGraph(RootGraphAnimProperties, AnimGraph, RootAnimNodeContainer);
+  }
 
-			if (PoseIndex < BlendPoseArray.Num()) {
-				FString LinkID = BlendPoseArray[PoseIndex]->AsObject()->GetStringField(TEXT("LinkID"));
-                const FString IndexedPinName = FString::Printf(TEXT("BlendPose_%d"), BlendPoseIndex);
+  if (ShouldCompileImmediately()) {
+    FKismetEditorUtilities::CompileBlueprint(AnimBlueprint,
+                                             EBlueprintCompileOptions::None);
+  } else {
+    UE_LOG(LogJsonAsAsset, Log,
+           TEXT("Skipping immediate compile for AnimBlueprint '%s' due to "
+                "BlueprintImport.CompilePolicy=%s"),
+           *GetAssetName(),
+           *StaticEnum<EJBlueprintCompilePolicy>()->GetNameStringByValue(
+               static_cast<int64>(GetBlueprintImportSettings().CompilePolicy)));
+  }
 
-				FUObjectExport* TargetNodeExport = Container->Find(LinkID);
-				if (!TargetNodeExport || !TargetNodeExport->IsJsonAndObjectValid()) {
-					continue;
-				}
-
-				UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(TargetNodeExport->Object);
-
-				LinkPoseInputPin(IndexedPinName, BlendListByEnum, TargetNode, AnimGraph);
-			}
-		}
-
-		BlendPoseIndex++;
-	}
+  return OnAssetCreation(AnimBlueprint);
 }
 
-void IAnimationBlueprintImporter::CreateAnimGraphNodes(UEdGraph* AnimGraph, const TSharedPtr<FJsonObject>& AnimNodeProperties, FUObjectExportContainer& OutContainer) {
-	for (const auto& Pair : AnimNodeProperties->Values) {
-		FString Key = Pair.Key;
+UAnimBlueprint *
+IAnimationBlueprintImporter::CreateAnimBlueprint(UClass *ParentClass) {
+  if (!ParentClass || !GetPackage()) {
+    return nullptr;
+  }
 
-		TSharedPtr<FJsonObject> Value = Pair.Value->AsObject();
+  UBlueprint *ExistingBlueprint =
+      FindObject<UBlueprint>(GetPackage(), *GetAssetName());
+  if (!ExistingBlueprint) {
+    const FString ExistingObjectPath =
+        GetPackage()->GetPathName() + TEXT(".") + GetAssetName();
+    ExistingBlueprint = LoadObject<UBlueprint>(nullptr, *ExistingObjectPath);
+  }
 
-		/* Find the NodeType and GUID from the key */
-		FString NodeType, NodeStringGUID; {
-			Key.Split(TEXT("_"), &NodeType, &NodeStringGUID, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+  const EJBlueprintReimportPolicy Policy =
+      GetBlueprintImportSettings().ReimportPolicy;
+  if (ExistingBlueprint &&
+      Policy == EJBlueprintReimportPolicy::AlwaysRecreate) {
+    MoveToTransientPackageAndRename(ExistingBlueprint);
+    ExistingBlueprint = nullptr;
+  }
 
-			/* Handle case for format: "AnimGraphNode[0]" */
-			if (Key.Contains("[")) {
-				FString CleanKey = Key.Left(Key.Find("["));
-				
-				TArray<FString> Parts; {
-					CleanKey.ParseIntoArray(Parts, TEXT("_"));
-				}
-				
-				NodeType = Parts.Num() >= 2 ? Parts[0] + TEXT("_") + Parts[1] : CleanKey;
-				NodeStringGUID.Empty();
-			}
-		}
+  // Avoid UnrealEd assert in FKismetEditorUtilities::CreateBlueprint when an
+  // object with this name already exists in the package.
+  if (ExistingBlueprint) {
+    if (UAnimBlueprint *ExistingAnimBlueprint =
+            Cast<UAnimBlueprint>(ExistingBlueprint)) {
+      if (Policy == EJBlueprintReimportPolicy::RecreateInvalid &&
+          !IsAnimBlueprintValid(ExistingAnimBlueprint)) {
+        MoveToTransientPackageAndRename(ExistingAnimBlueprint);
+      } else if (Policy == EJBlueprintReimportPolicy::ReuseValid &&
+                 !IsAnimBlueprintValid(ExistingAnimBlueprint)) {
+        if (IsStrictBlueprintImport()) {
+          UE_LOG(LogJsonAsAsset, Error,
+                 TEXT("ReuseValid policy prevented recreation of invalid "
+                      "AnimBlueprint '%s'"),
+                 *GetAssetName());
+          return nullptr;
+        }
+        MoveToTransientPackageAndRename(ExistingAnimBlueprint);
+      } else {
+        return Cast<UAnimBlueprint>(CreateAsset(ExistingAnimBlueprint));
+      }
+    } else {
+      UE_LOG(LogJsonAsAsset, Error,
+             TEXT("Cannot create AnimBlueprint '%s' in '%s': existing "
+                  "Blueprint is not UAnimBlueprint."),
+             *GetAssetName(), *GetPackage()->GetPathName());
+      return nullptr;
+    }
+  }
 
-		if (NodeType == "AnimGraphNode") {
-			NodeType = Key;
-		}
+  const EBlueprintType BlueprintType = GetBlueprintType(ParentClass);
 
-		/* Redirections */
-		if (NodeType == "AnimGraphNode_SubInput") {
-			NodeType = "AnimGraphNode_LinkedInputPose";
-		}
+  if (UBlueprint *Blueprint = FKismetEditorUtilities::CreateBlueprint(
+          ParentClass, GetPackage(), FName(*GetAssetName()), BlueprintType,
+          UAnimBlueprint::StaticClass(),
+          UAnimBlueprintGeneratedClass::StaticClass())) {
+    return Cast<UAnimBlueprint>(CreateAsset(Blueprint));
+  }
 
-		/* Only add json object data, transition result is handled different */
-		if (NodeType == "AnimGraphNode_TransitionResult") {
-			OutContainer.Exports.Add(
-				new FUObjectExport(
-					FName(*Key),
-					FName(*NodeType),
-					FName(AnimGraph->GetName()),
-					Value,
-					nullptr,
-					nullptr
-				)
-			);
-
-			continue;
-		}
-
-		/* Parse the NodeGuid, if not parsed properly, generate a new one */
-		FGuid NodeGuid; {
-			FGuid::Parse(NodeStringGUID, NodeGuid);
-
-			if (!NodeGuid.IsValid()) NodeGuid = FGuid();
-		}
-
-		const UClass* Class = FindClassByType(NodeType);
-		
-		if (!Class) continue;
-
-		UAnimGraphNode_Base* Node = NewObject<UAnimGraphNode_Base>(AnimGraph, Class, NAME_None, RF_Transactional);
-		Node->NodeGuid = NodeGuid;
-
-		/* Add new node */
-		OutContainer.Exports.Add(
-			new FUObjectExport(
-				FName(*Key),
-				FName(*NodeType),
-				FName(AnimGraph->GetName()),
-				Value,
-				Node,
-				AnimGraph
-			)
-		);
-	}
+  return nullptr;
 }
 
-void IAnimationBlueprintImporter::AddNodesToGraph(UEdGraph* AnimGraph, FUObjectExportContainer* Container) {
-    for (const FUObjectExport* Export : Container->Exports) {
-        if (!IsValid(Export->Object) || !Export->JsonObject.IsValid()) {
+void IAnimationBlueprintImporter::CreateGraph(
+    const TSharedPtr<FJsonObject> &AnimNodeProperties, UEdGraph *AnimGraph,
+    FUObjectExportContainer *Container) {
+  if (!AnimGraph || !Container || !AnimNodeProperties.IsValid()) {
+    return;
+  }
+
+  /* Remove all pre-existing nodes */
+  ResetGraphNodes(AnimGraph);
+
+  CreateAnimGraphNodes(AnimGraph, AnimNodeProperties, *Container);
+  AddNodesToGraph(AnimGraph, Container);
+
+  HandleNodeDeserialization(Container);
+  ConnectAnimGraphNodes(Container, AnimGraph);
+  AutoLayoutAnimGraphNodes(Container->Exports);
+
+  for (const FUObjectExport *ExportNode : Container->Exports) {
+    if (!ExportNode || !ExportNode->JsonObject.IsValid()) {
+      continue;
+    }
+
+    const TSharedPtr<FJsonObject> ExportJsonObject = ExportNode->JsonObject;
+    if (!ExportJsonObject.IsValid()) {
+      continue;
+    }
+
+    if (UAnimGraphNode_StateMachine *StateMachine =
+            Cast<UAnimGraphNode_StateMachine>(ExportNode->Object)) {
+      UEdGraph *NewStateMachineGraph = FBlueprintEditorUtils::CreateNewGraph(
+          StateMachine, NAME_None, UAnimationStateMachineGraph::StaticClass(),
+          UAnimationStateMachineSchema::StaticClass());
+      UAnimationStateMachineGraph *EditorStateMachineGraph =
+          Cast<UAnimationStateMachineGraph>(NewStateMachineGraph);
+      if (!EditorStateMachineGraph) {
+        UE_LOG(LogJsonAsAsset, Warning,
+               TEXT("AnimBlueprint '%s': failed to create state machine graph."),
+               *GetAssetName());
+        if (IsStrictBlueprintImport()) {
+          return;
+        }
+        continue;
+      }
+      EditorStateMachineGraph->OwnerAnimGraphNode = StateMachine;
+
+      if (!ExportJsonObject->HasField(TEXT("StateMachineIndexInClass"))) {
+        if (IsVerboseBlueprintImport()) {
+          UE_LOG(
+              LogJsonAsAsset, Warning,
+              TEXT("State machine node '%s' has no StateMachineIndexInClass"),
+              *ExportNode->GetName().ToString());
+        }
+        continue;
+      }
+
+      const int32 StateMachineIndex =
+          ExportJsonObject->GetIntegerField(TEXT("StateMachineIndexInClass"));
+      if (!BakedStateMachines.IsValidIndex(StateMachineIndex) ||
+          !BakedStateMachines[StateMachineIndex].IsValid()) {
+        UE_LOG(LogJsonAsAsset, Warning,
+               TEXT("State machine index %d out of bounds for '%s'"),
+               StateMachineIndex, *GetAssetName());
+        if (IsStrictBlueprintImport()) {
+          return;
+        }
+        continue;
+      }
+
+      const TSharedPtr<FJsonObject> StateMachineObject =
+          BakedStateMachines[StateMachineIndex]->AsObject();
+      if (!StateMachineObject.IsValid()) {
+        continue;
+      }
+
+      FString MachineName;
+      if (!StateMachineObject->TryGetStringField(TEXT("MachineName"),
+                                                 MachineName)) {
+        MachineName = FString::Printf(TEXT("StateMachine_%d"), StateMachineIndex);
+      }
+      EditorStateMachineGraph->Rename(*MachineName);
+
+      const UEdGraphSchema *Schema = EditorStateMachineGraph->GetSchema();
+      Schema->CreateDefaultNodesForGraph(*EditorStateMachineGraph);
+
+      UEdGraph *ParentGraph = StateMachine->GetGraph();
+
+      if (ParentGraph->SubGraphs.Find(EditorStateMachineGraph) == INDEX_NONE) {
+        ParentGraph->Modify();
+        ParentGraph->SubGraphs.Add(EditorStateMachineGraph);
+      }
+
+      StateMachine->EditorStateMachineGraph = EditorStateMachineGraph;
+      CreateStateMachineGraph(EditorStateMachineGraph, StateMachineObject,
+                              GetObjectSerializer(), RootAnimNodeContainer,
+                              ReversedNodesKeys, this, AnimBlueprint);
+
+      /* Add nodes to graph */
+      if (!StateMachineObject->HasTypedField<EJson::Array>(TEXT("States")))
+        continue;
+
+      TArray<TSharedPtr<FJsonValue>> States =
+          StateMachineObject->GetArrayField(TEXT("States"));
+
+      for (const TSharedPtr<FJsonValue> &StateValue : States) {
+        if (!StateValue.IsValid() || StateValue->Type != EJson::Object ||
+            !StateValue->AsObject().IsValid()) {
+          UE_LOG(LogJsonAsAsset, Warning,
+                 TEXT("AnimBlueprint '%s': invalid state object in machine "
+                      "'%s', skipping."),
+                 *GetAssetName(), *MachineName);
+          continue;
+        }
+
+        const TSharedPtr<FJsonObject> StateObject = StateValue->AsObject();
+        if (!StateObject.IsValid()) {
+          continue;
+        }
+        FString StateName = StateObject->GetStringField(TEXT("StateName"));
+
+        UAnimationStateGraph *Graph = nullptr;
+
+        for (UEdGraph *SubGraph : EditorStateMachineGraph->SubGraphs) {
+          if (SubGraph->GetName() == StateName) {
+            Graph = Cast<UAnimationStateGraph>(SubGraph);
+          }
+        }
+
+        TSharedPtr<FJsonObject> StateMachineAnimNodeProperties =
+            MakeShared<FJsonObject>();
+
+        for (const auto &Pair : RootAnimNodeProperties->Values) {
+          const FString Key = Pair.Key;
+          if (!Pair.Value.IsValid() || Pair.Value->Type != EJson::Object ||
+              !Pair.Value->AsObject().IsValid()) {
             continue;
+          }
+
+          const TSharedPtr<FJsonObject> Value = Pair.Value->AsObject();
+
+          if (!Value.IsValid())
+            continue;
+
+          if (Value->HasField(TEXT("State")) &&
+              Value->HasField(TEXT("Machine"))) {
+            const FString NodeStateName = Value->GetStringField(TEXT("State"));
+            const FString NodeMachineName =
+                Value->GetStringField(TEXT("Machine"));
+
+            if (StateName == NodeStateName && NodeMachineName == MachineName) {
+              StateMachineAnimNodeProperties->SetObjectField(Key, Value);
+            }
+          }
         }
 
-        UAnimGraphNode_Base* Node = Cast<UAnimGraphNode_Base>(Export->Object);
+        if (Graph) {
+          FUObjectExportContainer *StateMachineContainer =
+              new FUObjectExportContainer();
+          CreateGraph(StateMachineAnimNodeProperties, Graph,
+                      StateMachineContainer);
 
-        Node->Rename(nullptr, AnimGraph);
-        AnimGraph->Nodes.Add(Node);
-        Node->Modify();
+          if (Graph->MyResultNode) {
+            Graph->MyResultNode->BreakAllNodeLinks();
+            Graph->RemoveNode(Graph->MyResultNode);
+            Graph->MyResultNode->ConditionalBeginDestroy();
+            Graph->MyResultNode = nullptr;
+          }
+
+          for (const FUObjectExport *StateMachineExport :
+               StateMachineContainer->Exports) {
+            if (UAnimGraphNode_StateResult *StateResult =
+                    Cast<UAnimGraphNode_StateResult>(
+                        StateMachineExport->Object)) {
+              Graph->MyResultNode = StateResult;
+            }
+          }
+
+          delete StateMachineContainer;
+        }
+      }
     }
+  }
 }
 
-void IAnimationBlueprintImporter::HandleNodeDeserialization(FUObjectExportContainer* Container) {
-	GetObjectSerializer()->GetPropertySerializer()->BlacklistedPropertyNames.Add(TEXT("LinkID"));
+void inline LinkPoseInputPin(const FString &PinName, UAnimGraphNode_Base *Node,
+                             UAnimGraphNode_Base *TargetNode,
+                             UEdGraph *AnimGraph) {
+  UEdGraphPin *InputPin = Node->FindPin(PinName, EGPD_Input);
+  UEdGraphPin *OutputPin = GetFirstOutputPin(TargetNode);
 
-	for (FUObjectExport* NodeExport : Container->Exports) {
-		if (NodeExport->Object == nullptr) continue;
+  if (InputPin && OutputPin) {
+    InputPin->MakeLinkTo(OutputPin);
+    InputPin->DefaultValue.Reset();
 
-		UAnimGraphNode_Base* Node = Cast<UAnimGraphNode_Base>(NodeExport->Object);
-		TSharedPtr<FJsonObject> NodeProperties = NodeExport->JsonObject;
+    Node->Modify();
+    TargetNode->Modify();
+    AnimGraph->Modify();
+  }
+}
 
-		/* Post-processing modifications ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-		if (NodeProperties->HasField(TEXT("GroupRole")) && NodeProperties->HasField(TEXT("GroupIndex"))) {
-			const int GroupIndexInteger = NodeProperties->GetIntegerField(TEXT("GroupIndex"));
+void IAnimationBlueprintImporter::UpdateBlendListByEnumVisibleEntries(
+    FUObjectExport *NodeExport, FUObjectExportContainer *Container,
+    UEdGraph *AnimGraph) {
+  TSharedPtr<FJsonObject> NodeJsonObject = NodeExport->JsonObject;
+  UAnimGraphNode_BlendListByEnum *BlendListByEnum =
+      Cast<UAnimGraphNode_BlendListByEnum>(NodeExport->Object);
 
-			/* -1 is no group role */
-			if (GroupIndexInteger != -1 && SyncGroupNames.IsValidIndex(GroupIndexInteger)) {
-				TSharedPtr<FJsonObject> SyncGroup = MakeShared<FJsonObject>();
-				FString SyncGroupName = SyncGroupNames[GroupIndexInteger];
-			
-				SyncGroup->SetStringField(TEXT("GroupName"), SyncGroupName);
-				SyncGroup->SetStringField(TEXT("GroupRole"), NodeProperties->GetStringField(TEXT("GroupRole")));
+  if (!BlendListByEnum || !NodeJsonObject) {
+    return;
+  }
 
-				NodeProperties->SetObjectField(TEXT("SyncGroup"), SyncGroup);
-			}
-		}
+  /* Get the BoundEnum set before in the BlendListByEnum node */
+  const UEnum *BoundEnum = BlendListByEnum->GetEnum();
+  if (!BoundEnum) {
+    return;
+  }
+
+  TArray<TSharedPtr<FJsonValue>> EnumToPoseIndexArray =
+      NodeJsonObject->GetArrayField(TEXT("EnumToPoseIndex"));
+
+  /* Create VisibleEnumEntries array using the enum */
+  TArray<FName> VisibleEnumEntries;
+
+  for (int32 i = 0; i < EnumToPoseIndexArray.Num(); i++) {
+    const int32 Value = static_cast<int32>(EnumToPoseIndexArray[i]->AsNumber());
+
+    if (Value != 0) {
+      if (BoundEnum->NumEnums() > i) {
+        FString EnumEntryName = BoundEnum->GetNameByIndex(i).ToString();
+        if (EnumEntryName.Contains("::")) {
+          EnumEntryName.Split("::", nullptr, &EnumEntryName);
+        }
+
+        VisibleEnumEntries.Add(FName(*EnumEntryName));
+      }
+    }
+  }
+
+  if (const FArrayProperty *VisEnumArrayProp = FindFProperty<FArrayProperty>(
+          BlendListByEnum->GetClass(), TEXT("VisibleEnumEntries"))) {
+    const void *ArrayPtr =
+        VisEnumArrayProp->ContainerPtrToValuePtr<void>(BlendListByEnum);
+    FScriptArrayHelper ArrayHelper(VisEnumArrayProp, ArrayPtr);
+
+    ArrayHelper.Resize(0);
+
+    const FNameProperty *NameProp =
+        CastField<FNameProperty>(VisEnumArrayProp->Inner);
+    if (!NameProp) {
+      return;
+    }
+
+    for (const FName &Entry : VisibleEnumEntries) {
+      const int32 NewIdx = ArrayHelper.AddValue();
+      void *ElemPtr = ArrayHelper.GetRawPtr(NewIdx);
+
+      NameProp->SetPropertyValue(ElemPtr, Entry);
+    }
+  }
+
+  BlendListByEnum->ReconstructNode();
+
+  TArray<TSharedPtr<FJsonValue>> BlendPoseArray =
+      NodeJsonObject->GetArrayField(TEXT("BlendPose"));
+
+  int BlendPoseIndex = 0;
+  if (BlendPoseArray.IsValidIndex(0) && BlendPoseArray[0].IsValid() &&
+      BlendPoseArray[0]->Type == EJson::Object &&
+      BlendPoseArray[0]->AsObject().IsValid()) {
+    FString LinkID =
+        BlendPoseArray[0]->AsObject()->GetStringField(TEXT("LinkID"));
+    const FString IndexedPinName = FString::Printf(TEXT("BlendPose_%d"), 0);
+
+    FUObjectExport *TargetNodeExport = Container->Find(LinkID);
+    if (!TargetNodeExport || !TargetNodeExport->IsJsonAndObjectValid()) {
+      return;
+    }
+
+    UAnimGraphNode_Base *TargetNode =
+        Cast<UAnimGraphNode_Base>(TargetNodeExport->Object);
+
+    LinkPoseInputPin(IndexedPinName, BlendListByEnum, TargetNode, AnimGraph);
+
+    BlendPoseIndex++;
+  }
+
+  /* Map poses corresponding to the bound enum */
+  for (int32 EnumIndex = 0; EnumIndex < BoundEnum->NumEnums() - 1;
+       ++EnumIndex) {
+    if (EnumIndex < EnumToPoseIndexArray.Num()) {
+      const int PoseIndex = EnumToPoseIndexArray[EnumIndex]->AsNumber();
+
+      if (PoseIndex == 0)
+        continue;
+
+      if (PoseIndex < BlendPoseArray.Num() &&
+          BlendPoseArray[PoseIndex].IsValid() &&
+          BlendPoseArray[PoseIndex]->Type == EJson::Object &&
+          BlendPoseArray[PoseIndex]->AsObject().IsValid()) {
+        FString LinkID = BlendPoseArray[PoseIndex]->AsObject()->GetStringField(
+            TEXT("LinkID"));
+        const FString IndexedPinName =
+            FString::Printf(TEXT("BlendPose_%d"), BlendPoseIndex);
+
+        FUObjectExport *TargetNodeExport = Container->Find(LinkID);
+        if (!TargetNodeExport || !TargetNodeExport->IsJsonAndObjectValid()) {
+          continue;
+        }
+
+        UAnimGraphNode_Base *TargetNode =
+            Cast<UAnimGraphNode_Base>(TargetNodeExport->Object);
+
+        LinkPoseInputPin(IndexedPinName, BlendListByEnum, TargetNode,
+                         AnimGraph);
+      }
+    }
+
+    BlendPoseIndex++;
+  }
+}
+
+void IAnimationBlueprintImporter::CreateAnimGraphNodes(
+    UEdGraph *AnimGraph, const TSharedPtr<FJsonObject> &AnimNodeProperties,
+    FUObjectExportContainer &OutContainer) {
+  for (const auto &Pair : AnimNodeProperties->Values) {
+    FString Key = Pair.Key;
+
+    if (!Pair.Value.IsValid() || Pair.Value->Type != EJson::Object ||
+        !Pair.Value->AsObject().IsValid()) {
+      if (IsVerboseBlueprintImport()) {
+        UE_LOG(LogJsonAsAsset, Warning,
+               TEXT("AnimBlueprint '%s': skipping non-object node payload '%s'."),
+               *GetAssetName(), *Key);
+      }
+      continue;
+    }
+
+    TSharedPtr<FJsonObject> Value = Pair.Value->AsObject();
+
+    /* Find the NodeType and GUID from the key */
+    FString NodeType, NodeStringGUID;
+    {
+      Key.Split(TEXT("_"), &NodeType, &NodeStringGUID, ESearchCase::IgnoreCase,
+                ESearchDir::FromEnd);
+
+      /* Handle case for format: "AnimGraphNode[0]" */
+      if (Key.Contains("[")) {
+        FString CleanKey = Key.Left(Key.Find("["));
+
+        TArray<FString> Parts;
+        {
+          CleanKey.ParseIntoArray(Parts, TEXT("_"));
+        }
+
+        NodeType =
+            Parts.Num() >= 2 ? Parts[0] + TEXT("_") + Parts[1] : CleanKey;
+        NodeStringGUID.Empty();
+      }
+    }
+
+    if (NodeType == "AnimGraphNode") {
+      NodeType = Key;
+    }
+
+    /* Redirections */
+    if (NodeType == "AnimGraphNode_SubInput") {
+      NodeType = "AnimGraphNode_LinkedInputPose";
+    }
+
+    if (NodeType.IsEmpty()) {
+      continue;
+    }
+
+    /* Only add json object data, transition result is handled different */
+    if (NodeType == "AnimGraphNode_TransitionResult") {
+      OutContainer.Exports.Add(new FUObjectExport(FName(*Key), FName(*NodeType),
+                                                  FName(AnimGraph->GetName()),
+                                                  Value, nullptr, nullptr));
+
+      continue;
+    }
+
+    /* Parse the NodeGuid, if not parsed properly, generate a new one */
+    FGuid NodeGuid;
+    {
+      FGuid::Parse(NodeStringGUID, NodeGuid);
+
+      if (!NodeGuid.IsValid())
+        NodeGuid = FGuid();
+    }
+
+    const UClass *Class = FindClassByType(NodeType);
+
+    if (!Class)
+      continue;
+
+    UAnimGraphNode_Base *Node = NewObject<UAnimGraphNode_Base>(
+        AnimGraph, Class, NAME_None, RF_Transactional);
+    Node->NodeGuid = NodeGuid;
+
+    /* Add new node */
+    OutContainer.Exports.Add(new FUObjectExport(FName(*Key), FName(*NodeType),
+                                                FName(AnimGraph->GetName()),
+                                                Value, Node, AnimGraph));
+  }
+}
+
+void IAnimationBlueprintImporter::AddNodesToGraph(
+    UEdGraph *AnimGraph, FUObjectExportContainer *Container) {
+  for (const FUObjectExport *Export : Container->Exports) {
+    if (!IsValid(Export->Object) || !Export->JsonObject.IsValid()) {
+      continue;
+    }
+
+    UAnimGraphNode_Base *Node = Cast<UAnimGraphNode_Base>(Export->Object);
+
+    Node->Rename(nullptr, AnimGraph);
+    AnimGraph->Nodes.Add(Node);
+    Node->Modify();
+  }
+}
+
+void IAnimationBlueprintImporter::HandleNodeDeserialization(
+    FUObjectExportContainer *Container) {
+  GetObjectSerializer()->GetPropertySerializer()->BlacklistedPropertyNames.Add(
+      TEXT("LinkID"));
+
+  for (FUObjectExport *NodeExport : Container->Exports) {
+    if (NodeExport->Object == nullptr)
+      continue;
+
+    UAnimGraphNode_Base *Node = Cast<UAnimGraphNode_Base>(NodeExport->Object);
+    TSharedPtr<FJsonObject> NodeProperties = NodeExport->JsonObject;
+
+    /* Post-processing modifications ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+    if (NodeProperties->HasField(TEXT("GroupRole")) &&
+        NodeProperties->HasField(TEXT("GroupIndex"))) {
+      const int GroupIndexInteger =
+          NodeProperties->GetIntegerField(TEXT("GroupIndex"));
+
+      /* -1 is no group role */
+      if (GroupIndexInteger != -1 &&
+          SyncGroupNames.IsValidIndex(GroupIndexInteger)) {
+        TSharedPtr<FJsonObject> SyncGroup = MakeShared<FJsonObject>();
+        FString SyncGroupName = SyncGroupNames[GroupIndexInteger];
+
+        SyncGroup->SetStringField(TEXT("GroupName"), SyncGroupName);
+        SyncGroup->SetStringField(
+            TEXT("GroupRole"),
+            NodeProperties->GetStringField(TEXT("GroupRole")));
+
+        NodeProperties->SetObjectField(TEXT("SyncGroup"), SyncGroup);
+      }
+    }
 
 #if ENGINE_UE4
-		/* UE5+ games use PhysicsBodyDefinitions for AnimGraphNode_AnimDynamics */
-		if (NodeProperties->HasField(TEXT("PhysicsBodyDefinitions"))) {
-			TSharedPtr<FJsonObject> PhysicsBodyDefinition = NodeProperties->GetArrayField(TEXT("PhysicsBodyDefinitions"))[0]->AsObject();
-			if (PhysicsBodyDefinition.IsValid()) {
-				for (const auto& Pair : PhysicsBodyDefinition->Values) {
-					NodeExport->JsonObject->SetField(Pair.Key, Pair.Value);
-				}
-			}
-		}
+    /* UE5+ games use PhysicsBodyDefinitions for AnimGraphNode_AnimDynamics */
+    if (NodeProperties->HasField(TEXT("PhysicsBodyDefinitions"))) {
+      const TArray<TSharedPtr<FJsonValue>> PhysicsBodyDefinitions =
+          NodeProperties->GetArrayField(TEXT("PhysicsBodyDefinitions"));
+      if (PhysicsBodyDefinitions.IsValidIndex(0) &&
+          PhysicsBodyDefinitions[0].IsValid()) {
+        TSharedPtr<FJsonObject> PhysicsBodyDefinition =
+            PhysicsBodyDefinitions[0]->AsObject();
+        if (PhysicsBodyDefinition.IsValid()) {
+          for (const auto &Pair : PhysicsBodyDefinition->Values) {
+            NodeExport->JsonObject->SetField(Pair.Key, Pair.Value);
+          }
+        }
+      }
+    }
 #else
-		/* UE5+ games use PhysicsBodyDefinitions for AnimGraphNode_AnimDynamics */
-		if (!NodeExport->HasProperty("PhysicsBodyDefinitions")) {
-			TSharedPtr<FJsonObject> PhysicsBodyDefinition = MakeShared<FJsonObject>();
-			auto& RootValues = NodeExport->JsonObject->Values;
+    /* UE5+ games use PhysicsBodyDefinitions for AnimGraphNode_AnimDynamics */
+    if (!NodeExport->HasProperty("PhysicsBodyDefinitions")) {
+      TSharedPtr<FJsonObject> PhysicsBodyDefinition = MakeShared<FJsonObject>();
+      auto &RootValues = NodeExport->JsonObject->Values;
 
-			auto MoveField = [&](const FString& Key) {
-				if (RootValues.Contains(Key)) {
-					if (Key == TEXT("LocalJointOffset")) {
-						TSharedPtr<FJsonObject> Original = RootValues[Key]->AsObject();
+      auto MoveField = [&](const FString &Key) {
+        if (RootValues.Contains(Key)) {
+          if (Key == TEXT("LocalJointOffset")) {
+            TSharedPtr<FJsonObject> Original = RootValues[Key]->AsObject();
 
-						if (Original.IsValid()) {
-							TSharedPtr<FJsonObject> VecObj = MakeShared<FJsonObject>(*Original);
+            if (Original.IsValid()) {
+              TSharedPtr<FJsonObject> VecObj =
+                  MakeShared<FJsonObject>(*Original);
 
-							for (const auto& Pair : Original->Values) {
-								if (Pair.Value->Type == EJson::Number && Pair.Value->AsNumber() != 0.0) {
-									VecObj->SetNumberField(Pair.Key, -Pair.Value->AsNumber());
-								}
-								else {
-									VecObj->SetField(Pair.Key, Pair.Value);
-								}
-							}
+              for (const auto &Pair : Original->Values) {
+                if (Pair.Value->Type == EJson::Number &&
+                    Pair.Value->AsNumber() != 0.0) {
+                  VecObj->SetNumberField(Pair.Key, -Pair.Value->AsNumber());
+                } else {
+                  VecObj->SetField(Pair.Key, Pair.Value);
+                }
+              }
 
-							PhysicsBodyDefinition->SetObjectField(Key, VecObj);
-							return;
-						}
-					}
+              PhysicsBodyDefinition->SetObjectField(Key, VecObj);
+              return;
+            }
+          }
 
-					PhysicsBodyDefinition->SetField(Key, RootValues[Key]);
-				}
-			};
+          PhysicsBodyDefinition->SetField(Key, RootValues[Key]);
+        }
+      };
 
-			/* Move all PhysicsBodyDefinition related fields */
-			MoveField(TEXT("BoundBone"));
-			MoveField(TEXT("BoxExtents"));
-			MoveField(TEXT("LocalJointOffset"));
-			MoveField(TEXT("ConstraintSetup"));
-			MoveField(TEXT("CollisionType"));
-			MoveField(TEXT("SphereCollisionRadius"));
+      /* Move all PhysicsBodyDefinition related fields */
+      MoveField(TEXT("BoundBone"));
+      MoveField(TEXT("BoxExtents"));
+      MoveField(TEXT("LocalJointOffset"));
+      MoveField(TEXT("ConstraintSetup"));
+      MoveField(TEXT("CollisionType"));
+      MoveField(TEXT("SphereCollisionRadius"));
 
-			/* Create array and assign */
-			TArray<TSharedPtr<FJsonValue>> PhysicsBodyDefinitionsArray;
-			PhysicsBodyDefinitionsArray.Add(MakeShared<FJsonValueObject>(PhysicsBodyDefinition));
+      /* Create array and assign */
+      TArray<TSharedPtr<FJsonValue>> PhysicsBodyDefinitionsArray;
+      PhysicsBodyDefinitionsArray.Add(
+          MakeShared<FJsonValueObject>(PhysicsBodyDefinition));
 
-			NodeExport->JsonObject->SetArrayField(TEXT("PhysicsBodyDefinitions"), PhysicsBodyDefinitionsArray);
-		}
+      NodeExport->JsonObject->SetArrayField(TEXT("PhysicsBodyDefinitions"),
+                                            PhysicsBodyDefinitionsArray);
+    }
 #endif
 
 #if ENGINE_UE4
-		/* Looks like UE5 flipped axes on LocalJointOffset */
-		if (GJsonAsAssetRuntime.IsUE5()) {
-			if (NodeProperties->HasField(TEXT("LocalJointOffset"))) {
-				auto LocalJointOffset = NodeProperties->GetObjectField(TEXT("LocalJointOffset"));
-				LocalJointOffset->SetNumberField("X", -LocalJointOffset->GetNumberField(TEXT("X")));
-				LocalJointOffset->SetNumberField("Y", -LocalJointOffset->GetNumberField(TEXT("Y")));
-				LocalJointOffset->SetNumberField("Z", -LocalJointOffset->GetNumberField(TEXT("Z")));
-			}
-		}
-#endif
-		
-		GetObjectSerializer()->DeserializeObjectProperties(NodeProperties, Node);
-
-		/* Specific needs for certain nodes ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-		if (UAnimGraphNode_SaveCachedPose* SaveCachedPose = Cast<UAnimGraphNode_SaveCachedPose>(Node)) {
-			SaveCachedPose->CacheName = NodeProperties->GetStringField(TEXT("CachePoseName"));
-		}
-
-		if (UAnimGraphNode_UseCachedPose* UseCachedPose = Cast<UAnimGraphNode_UseCachedPose>(Node)) {
-			if (NodeProperties->HasField(TEXT("LinkToCachingNode"))) {
-				const TSharedPtr<FJsonObject> LinkToCachingNode = NodeProperties->GetObjectField(TEXT("LinkToCachingNode"));
-				
-				if (LinkToCachingNode->HasField(TEXT("LinkID"))) {
-					const FString LinkID = LinkToCachingNode->GetStringField(TEXT("LinkID"));
-
-					/* Specifically use RootAnimNodeContainer, because cached poses won't move with state machines */
-					FUObjectExport* SaveCachedPoseExport = RootAnimNodeContainer->Find(LinkID);
-					if (!SaveCachedPoseExport || !SaveCachedPoseExport->IsJsonAndObjectValid()) continue;
-
-					UAnimGraphNode_SaveCachedPose* SaveCachedPose = Cast<UAnimGraphNode_SaveCachedPose>(SaveCachedPoseExport->Object);
-					if (!SaveCachedPose) continue;
-					
-					UseCachedPose->SaveCachedPoseNode = SaveCachedPose;
-					UseCachedPose->Modify();
-					SaveCachedPose->Modify();
-				}
-			}
-		}
-
-		HandlePropertyBinding(NodeExport, AssetContainer->JsonObjects, Node, this, AnimBlueprint);
-
-		const UJsonAsAssetSettings* Settings = GetSettings();
-		if (Settings->AssetSettings.AnimationBlueprint.NodeIDComments) {
-			Node->NodeComment = NodeExport->GetName().ToString();
-			Node->bCommentBubbleVisible = true;
-		}
-		
-		Node->AllocateDefaultPins();
-		Node->Modify();
-		Node->PostPlacedNewNode();
-	}
-}
-
-void IAnimationBlueprintImporter::ConnectAnimGraphNodes(FUObjectExportContainer* Container, UEdGraph* AnimGraph) {
-    for (FUObjectExport* Export : Container->Exports) {
-        UAnimGraphNode_Base* Node = Cast<UAnimGraphNode_Base>(Export->Object);
-        const TSharedPtr<FJsonObject> Json = Export->JsonObject;
-		if (!Node || !Json.IsValid()) {
-			continue;
-		}
-
-        if (Cast<UAnimGraphNode_BlendListByEnum>(Node)) {
-            UpdateBlendListByEnumVisibleEntries(Export, Container, AnimGraph);
-        	continue;
-        }
-    	
-        for (const auto& Pair : Json->Values) {
-            const FString& Key = Pair.Key;
-            const TSharedPtr<FJsonValue>& Value = Pair.Value;
-            
-            if (Value->Type == EJson::Array) {
-                const TArray<TSharedPtr<FJsonValue>>& JsonArray = Value->AsArray();
-                
-                for (int32 Index = 0; Index < JsonArray.Num(); ++Index) {
-                    const TSharedPtr<FJsonValue>& Elem = JsonArray[Index];
-                    
-                    if (!Elem.IsValid() || !Elem->AsObject().IsValid()) {
-                        continue;
-                    }
-                    
-                    const TSharedPtr<FJsonObject>& Obj = Elem->AsObject();
-                    if (!Obj->HasField(TEXT("LinkID"))) {
-                        continue;
-                    }
-                    
-                    const FString LinkID = Obj->GetStringField(TEXT("LinkID"));
-					FUObjectExport* LinkedExport = Container->Find(LinkID);
-					if (!LinkedExport || !LinkedExport->IsJsonAndObjectValid()) {
-						continue;
-					}
-                    UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(LinkedExport->Object);
-                    
-                    if (!TargetNode) {
-                        continue;
-                    }
-                    
-                    const FStructProperty* NodeProp = GetNodeStructProperty(Node);
-                    if (!NodeProp) {
-                        continue;
-                    }
-                    
-                    for (TFieldIterator<FProperty> It(NodeProp->Struct); It; ++It) {
-                        FProperty* Property = *It;
-                        
-                        if (Property->GetName() != Pair.Key) {
-                            continue;
-                        }
-                        
-                        if (const FArrayProperty* ArrayProp = CastField<FArrayProperty>(Property)) {
-                            const FStructProperty* InnerStruct = CastField<FStructProperty>(ArrayProp->Inner);
-                            
-                            if (!InnerStruct || !InnerStruct->Struct->IsChildOf(FPoseLinkBase::StaticStruct())) {
-                                continue;
-                            }
-                            
-                            const FString IndexedPinName = FString::Printf(TEXT("%s_%d"), *Pair.Key, Index);
-                            LinkPoseInputPin(IndexedPinName, Node, TargetNode, AnimGraph);
-                        }
-                    }
-                }
-            }
-            
-            if (Value->Type == EJson::Object && Value->AsObject()->HasTypedField<EJson::String>(TEXT("LinkID"))) {
-                const FString LinkID = Value->AsObject()->GetStringField(TEXT("LinkID"));
-				FUObjectExport* LinkedExport = Container->Find(LinkID);
-				if (!LinkedExport || !LinkedExport->IsJsonAndObjectValid()) {
-					continue;
-				}
-                UAnimGraphNode_Base* TargetNode = Cast<UAnimGraphNode_Base>(LinkedExport->Object);
-                
-                if (!TargetNode) {
-                    continue;
-                }
-                
-                const FStructProperty* NodeProp = GetNodeStructProperty(Node);
-
-                if (!NodeProp) {
-                    continue;
-                }
-                
-                for (TFieldIterator<FProperty> It(NodeProp->Struct); It; ++It) {
-                    const FProperty* Property = *It;
-                    
-                    if (Property->GetName() != Pair.Key) {
-                        continue;
-                    }
-                    
-                    LinkPoseInputPin(Key, Node, TargetNode, AnimGraph);
-                }
-            }
-        }
+    /* Looks like UE5 flipped axes on LocalJointOffset */
+    if (GJsonAsAssetRuntime.IsUE5()) {
+      if (NodeProperties->HasField(TEXT("LocalJointOffset"))) {
+        auto LocalJointOffset =
+            NodeProperties->GetObjectField(TEXT("LocalJointOffset"));
+        LocalJointOffset->SetNumberField(
+            "X", -LocalJointOffset->GetNumberField(TEXT("X")));
+        LocalJointOffset->SetNumberField(
+            "Y", -LocalJointOffset->GetNumberField(TEXT("Y")));
+        LocalJointOffset->SetNumberField(
+            "Z", -LocalJointOffset->GetNumberField(TEXT("Z")));
+      }
     }
+#endif
+
+    GetObjectSerializer()->DeserializeObjectProperties(NodeProperties, Node);
+
+    /* Specific needs for certain nodes
+     * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     */
+    if (UAnimGraphNode_SaveCachedPose *SaveCachedPose =
+            Cast<UAnimGraphNode_SaveCachedPose>(Node)) {
+      SaveCachedPose->CacheName =
+          NodeProperties->GetStringField(TEXT("CachePoseName"));
+    }
+
+    if (UAnimGraphNode_UseCachedPose *UseCachedPose =
+            Cast<UAnimGraphNode_UseCachedPose>(Node)) {
+      if (NodeProperties->HasField(TEXT("LinkToCachingNode"))) {
+        const TSharedPtr<FJsonObject> LinkToCachingNode =
+            NodeProperties->GetObjectField(TEXT("LinkToCachingNode"));
+
+        if (LinkToCachingNode->HasField(TEXT("LinkID"))) {
+          const FString LinkID =
+              LinkToCachingNode->GetStringField(TEXT("LinkID"));
+
+          /* Specifically use RootAnimNodeContainer, because cached poses won't
+           * move with state machines */
+          FUObjectExport *SaveCachedPoseExport =
+              RootAnimNodeContainer->Find(LinkID);
+          if (!SaveCachedPoseExport ||
+              !SaveCachedPoseExport->IsJsonAndObjectValid())
+            continue;
+
+          UAnimGraphNode_SaveCachedPose *SaveCachedPose =
+              Cast<UAnimGraphNode_SaveCachedPose>(SaveCachedPoseExport->Object);
+          if (!SaveCachedPose)
+            continue;
+
+          UseCachedPose->SaveCachedPoseNode = SaveCachedPose;
+          UseCachedPose->Modify();
+          SaveCachedPose->Modify();
+        }
+      }
+    }
+
+    HandlePropertyBinding(NodeExport, AssetContainer->JsonObjects, Node, this,
+                          AnimBlueprint);
+
+    const UJsonAsAssetSettings *Settings = GetSettings();
+    if (Settings->AssetSettings.AnimationBlueprint.NodeIDComments) {
+      Node->NodeComment = NodeExport->GetName().ToString();
+      Node->bCommentBubbleVisible = true;
+    }
+
+    Node->AllocateDefaultPins();
+    Node->Modify();
+    Node->PostPlacedNewNode();
+  }
 }
 
-/* In newer versions of Unreal Engine, EvaluateGraphExposedInputs was moved to the main AnimBlueprintGeneratedClass class */
+void IAnimationBlueprintImporter::ConnectAnimGraphNodes(
+    FUObjectExportContainer *Container, UEdGraph *AnimGraph) {
+  for (FUObjectExport *Export : Container->Exports) {
+    UAnimGraphNode_Base *Node = Cast<UAnimGraphNode_Base>(Export->Object);
+    const TSharedPtr<FJsonObject> Json = Export->JsonObject;
+    if (!Node || !Json.IsValid()) {
+      continue;
+    }
+
+    if (Cast<UAnimGraphNode_BlendListByEnum>(Node)) {
+      UpdateBlendListByEnumVisibleEntries(Export, Container, AnimGraph);
+      continue;
+    }
+
+    for (const auto &Pair : Json->Values) {
+      const FString &Key = Pair.Key;
+      const TSharedPtr<FJsonValue> &Value = Pair.Value;
+
+      if (Value->Type == EJson::Array) {
+        const TArray<TSharedPtr<FJsonValue>> &JsonArray = Value->AsArray();
+
+        for (int32 Index = 0; Index < JsonArray.Num(); ++Index) {
+          const TSharedPtr<FJsonValue> &Elem = JsonArray[Index];
+
+          if (!Elem.IsValid() || !Elem->AsObject().IsValid()) {
+            continue;
+          }
+
+          const TSharedPtr<FJsonObject> &Obj = Elem->AsObject();
+          if (!Obj->HasField(TEXT("LinkID"))) {
+            continue;
+          }
+
+          const FString LinkID = Obj->GetStringField(TEXT("LinkID"));
+          FUObjectExport *LinkedExport = Container->Find(LinkID);
+          if (!LinkedExport || !LinkedExport->IsJsonAndObjectValid()) {
+            continue;
+          }
+          UAnimGraphNode_Base *TargetNode =
+              Cast<UAnimGraphNode_Base>(LinkedExport->Object);
+
+          if (!TargetNode) {
+            continue;
+          }
+
+          const FStructProperty *NodeProp = GetNodeStructProperty(Node);
+          if (!NodeProp) {
+            continue;
+          }
+
+          for (TFieldIterator<FProperty> It(NodeProp->Struct); It; ++It) {
+            FProperty *Property = *It;
+
+            if (Property->GetName() != Pair.Key) {
+              continue;
+            }
+
+            if (const FArrayProperty *ArrayProp =
+                    CastField<FArrayProperty>(Property)) {
+              const FStructProperty *InnerStruct =
+                  CastField<FStructProperty>(ArrayProp->Inner);
+
+              if (!InnerStruct || !InnerStruct->Struct->IsChildOf(
+                                      FPoseLinkBase::StaticStruct())) {
+                continue;
+              }
+
+              const FString IndexedPinName =
+                  FString::Printf(TEXT("%s_%d"), *Pair.Key, Index);
+              LinkPoseInputPin(IndexedPinName, Node, TargetNode, AnimGraph);
+            }
+          }
+        }
+      }
+
+      if (Value->Type == EJson::Object &&
+          Value->AsObject()->HasTypedField<EJson::String>(TEXT("LinkID"))) {
+        const FString LinkID =
+            Value->AsObject()->GetStringField(TEXT("LinkID"));
+        FUObjectExport *LinkedExport = Container->Find(LinkID);
+        if (!LinkedExport || !LinkedExport->IsJsonAndObjectValid()) {
+          continue;
+        }
+        UAnimGraphNode_Base *TargetNode =
+            Cast<UAnimGraphNode_Base>(LinkedExport->Object);
+
+        if (!TargetNode) {
+          continue;
+        }
+
+        const FStructProperty *NodeProp = GetNodeStructProperty(Node);
+
+        if (!NodeProp) {
+          continue;
+        }
+
+        for (TFieldIterator<FProperty> It(NodeProp->Struct); It; ++It) {
+          const FProperty *Property = *It;
+
+          if (Property->GetName() != Pair.Key) {
+            continue;
+          }
+
+          LinkPoseInputPin(Key, Node, TargetNode, AnimGraph);
+        }
+      }
+    }
+  }
+}
+
+/* In newer versions of Unreal Engine, EvaluateGraphExposedInputs was moved to
+ * the main AnimBlueprintGeneratedClass class */
 /* Here, we move them into the node data to use more easily */
-void IAnimationBlueprintImporter::ProcessEvaluateGraphExposedInputs(const TSharedPtr<FJsonObject>& AnimNodeProperties) const {
-	if (!GetAssetData()->HasField(TEXT("EvaluateGraphExposedInputs"))) return;
-	TArray<TSharedPtr<FJsonValue>> EvaluateInputs = GetAssetData()->GetArrayField(TEXT("EvaluateGraphExposedInputs"));
-	
-	for (const auto& Value : EvaluateInputs) {
-		TSharedPtr<FJsonObject> InputObj = Value->AsObject();
-		if (!InputObj.IsValid() || !InputObj->HasField(TEXT("ValueHandlerNodeProperty"))) {
-			continue;
-		}
-		
-		const TSharedPtr<FJsonObject> ValueHandlerNodeProperty = InputObj->GetObjectField(TEXT("ValueHandlerNodeProperty"));
-		if (!ValueHandlerNodeProperty.IsValid() || !ValueHandlerNodeProperty->HasField(TEXT("ObjectName"))) {
-			continue;
-		}
+void IAnimationBlueprintImporter::ProcessEvaluateGraphExposedInputs(
+    const TSharedPtr<FJsonObject> &AnimNodeProperties) const {
+  if (!GetAssetData()->HasField(TEXT("EvaluateGraphExposedInputs")))
+    return;
+  if (!AnimNodeProperties.IsValid()) {
+    return;
+  }
 
-		FString NodeName = ValueHandlerNodeProperty->GetStringField(TEXT("ObjectName")); {
-			NodeName.Split(":", nullptr, &NodeName);
-			NodeName = NodeName.Replace(TEXT("'"), TEXT(""));	
-		}
+  TArray<TSharedPtr<FJsonValue>> EvaluateInputs =
+      GetAssetData()->GetArrayField(TEXT("EvaluateGraphExposedInputs"));
 
-		if (!AnimNodeProperties->HasField(NodeName)) {
-			if (IsVerboseBlueprintImport()) {
-				UE_LOG(LogJsonAsAsset, Warning, TEXT("EvaluateGraphExposedInputs target '%s' was not found"), *NodeName);
-			}
-			if (IsStrictBlueprintImport()) {
-				return;
-			}
-			continue;
-		}
+  for (const auto &Value : EvaluateInputs) {
+    if (!Value.IsValid() || Value->Type != EJson::Object ||
+        !Value->AsObject().IsValid()) {
+      continue;
+    }
 
-		AnimNodeProperties->GetObjectField(NodeName)->SetObjectField(TEXT("EvaluateGraphExposedInputs"), InputObj);
-	}
+    TSharedPtr<FJsonObject> InputObj = Value->AsObject();
+    if (!InputObj.IsValid() ||
+        !InputObj->HasField(TEXT("ValueHandlerNodeProperty"))) {
+      continue;
+    }
+
+    const TSharedPtr<FJsonObject> ValueHandlerNodeProperty =
+        InputObj->GetObjectField(TEXT("ValueHandlerNodeProperty"));
+    if (!ValueHandlerNodeProperty.IsValid() ||
+        !ValueHandlerNodeProperty->HasField(TEXT("ObjectName"))) {
+      continue;
+    }
+
+    FString NodeName =
+        ValueHandlerNodeProperty->GetStringField(TEXT("ObjectName"));
+    {
+      NodeName.Split(":", nullptr, &NodeName);
+      NodeName = NodeName.Replace(TEXT("'"), TEXT(""));
+    }
+
+    if (!AnimNodeProperties->HasField(NodeName)) {
+      if (IsVerboseBlueprintImport()) {
+        UE_LOG(LogJsonAsAsset, Warning,
+               TEXT("EvaluateGraphExposedInputs target '%s' was not found"),
+               *NodeName);
+      }
+      if (IsStrictBlueprintImport()) {
+        return;
+      }
+      continue;
+    }
+
+    AnimNodeProperties->GetObjectField(NodeName)->SetObjectField(
+        TEXT("EvaluateGraphExposedInputs"), InputObj);
+  }
 }
 
-UEdGraph* IAnimationBlueprintImporter::FindAnimGraph(UAnimBlueprint* AnimBlueprint) {
-	for (UEdGraph* Graph : AnimBlueprint->FunctionGraphs) {
-		if (Graph && Graph->GetName() == TEXT("AnimGraph")) {
-			return Graph;
-		}
-	}
-	
-	return nullptr;
+UEdGraph *
+IAnimationBlueprintImporter::FindAnimGraph(UAnimBlueprint *AnimBlueprint) {
+  for (UEdGraph *Graph : AnimBlueprint->FunctionGraphs) {
+    if (Graph && Graph->GetName() == TEXT("AnimGraph")) {
+      return Graph;
+    }
+  }
+
+  return nullptr;
 }

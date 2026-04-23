@@ -39,6 +39,13 @@ enum class EJBlueprintCompilePolicy : uint8
 	Manual UMETA(DisplayName = "Manual")
 };
 
+UENUM()
+enum class EJImportPreset : uint8
+{
+	Default UMETA(DisplayName = "Default"),
+	BetterMartMirror UMETA(DisplayName = "BetterMartMirror")
+};
+
 USTRUCT()
 struct FJBlueprintImportSettings
 {
@@ -129,6 +136,16 @@ public:
 	bool Disable = false;
 };
 
+USTRUCT()
+struct FJPresetSettings
+{
+	GENERATED_BODY()
+public:
+	/* Optional preset profile for game-specific defaults. */
+	UPROPERTY(EditAnywhere, Config, Category = Preset)
+	EJImportPreset Profile = EJImportPreset::Default;
+};
+
 /* Powerful Unreal Engine Plugin that imports assets from FModel */
 UCLASS(Config = EditorPerProjectUserSettings, DefaultConfig)
 class JSONASASSET_API UJsonAsAssetSettings : public UDeveloperSettings {
@@ -138,6 +155,12 @@ public:
 
 	/* Overriden to stop the Editor spacing the words between JsonAsAsset */
 	virtual FText GetSectionText() const override;
+
+	/* Returns true when the BetterMart profile is enabled. */
+	bool IsBetterMartPresetEnabled() const;
+
+	/* Applies runtime-only preset behavior. */
+	void ApplyPresetRuntimeOverrides() const;
 	
 public:
 	UPROPERTY(EditAnywhere, Config, Category = Settings)
@@ -145,6 +168,9 @@ public:
 	
 	UPROPERTY(EditAnywhere, Config, Category = Settings)
 	FJSettings AssetSettings;
+
+	UPROPERTY(EditAnywhere, Config, Category = Settings)
+	FJPresetSettings Preset;
 
 	UPROPERTY(EditAnywhere, Config, Category = BlueprintImport)
 	FJBlueprintImportSettings BlueprintImport;

@@ -23,7 +23,7 @@ private:
 	void CreateGraph(const TSharedPtr<FJsonObject>& AnimNodeProperties, UEdGraph* AnimGraph, FUObjectExportContainer* Container);
 
 	/* Create Animation Graph Nodes and create a UObjectExportContainer to hold the data */
-	static void CreateAnimGraphNodes(UEdGraph* AnimGraph, const TSharedPtr<FJsonObject>& AnimNodeProperties, FUObjectExportContainer& OutContainer);
+	void CreateAnimGraphNodes(UEdGraph* AnimGraph, const TSharedPtr<FJsonObject>& AnimNodeProperties, FUObjectExportContainer& OutContainer);
 
 	/* Add a container full of nodes to a graph */
 	static void AddNodesToGraph(UEdGraph* AnimGraph, FUObjectExportContainer* Container);

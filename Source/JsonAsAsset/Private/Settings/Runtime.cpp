@@ -21,6 +21,10 @@ bool FJRuntime::IsUE4() const {
 	return MajorVersion == 4;
 }
 
+bool FJRuntime::IsBetterMartPresetActive() const {
+	return bBetterMartPresetActive;
+}
+
 void FJRuntime::Update() {
 	FString AppDataPath = FPlatformMisc::GetEnvironmentVariable(TEXT("APPDATA"));
 	AppDataPath = FPaths::Combine(AppDataPath, TEXT("FModel/AppSettings.json"));

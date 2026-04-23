@@ -225,7 +225,7 @@ struct FUObjectExport : FUObjectJsonValueExport {
 		}
 
 		if (bRemoveLast && Result.Num() > 0) {
-			Result.Pop(false);
+			Result.Pop(EAllowShrinking::No);
 		}
 
 		return Result;

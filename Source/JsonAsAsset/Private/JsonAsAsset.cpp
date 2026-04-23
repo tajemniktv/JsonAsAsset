@@ -68,6 +68,7 @@ void FJsonAsAssetModule::StartupModule() {
 	}
 
 	GJsonAsAssetRuntime.Update();
+	Settings->ApplyPresetRuntimeOverrides();
 }
 
 void FJsonAsAssetModule::ShutdownModule() {

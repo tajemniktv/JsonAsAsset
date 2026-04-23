@@ -5,47 +5,84 @@
 
 class UCurveTableAccessor final : public UCurveTable {
 public:
-	void ChangeTableMode(const ECurveTableMode Mode) {
-		CurveTableMode = Mode;
-	}
+  void ChangeTableMode(const ECurveTableMode Mode) { CurveTableMode = Mode; }
 };
 
-UObject* ICurveTableImporter::CreateAsset(UObject* CreatedAsset) {
-	return IImporter::CreateAsset(NewObject<UCurveTable>(GetPackage(), UCurveTable::StaticClass(), *GetAssetName(), RF_Public | RF_Standalone));
+UObject *ICurveTableImporter::CreateAsset(UObject *CreatedAsset) {
+  return IImporter::CreateAsset(NewObject<UCurveTableAccessor>(
+      GetPackage(), UCurveTableAccessor::StaticClass(), *GetAssetName(),
+      RF_Public | RF_Standalone));
 }
 
 bool ICurveTableImporter::Import() {
-	const TSharedPtr<FJsonObject> RowData = GetAssetData()->GetObjectField(TEXT("Rows"));
-	UCurveTable* CurveTable = Create<UCurveTable>();
+  UCurveTable *CurveTable = Create<UCurveTable>();
+  if (!CurveTable || !GetAssetData().IsValid() ||
+      !GetAssetData()->HasField(TEXT("Rows"))) {
+    UE_LOG(LogJsonAsAsset, Error,
+           TEXT("CurveTable import failed for '%s': missing Rows."),
+           *GetAssetName());
+    return false;
+  }
 
-	/* Used to determine curve type */
-	ECurveTableMode CurveTableMode = ECurveTableMode::RichCurves; {
-		if (FString CurveMode; GetAssetData()->TryGetStringField(TEXT("CurveTableMode"), CurveMode))
-			CurveTableMode = static_cast<ECurveTableMode>(StaticEnum<ECurveTableMode>()->GetValueByNameString(CurveMode));
+  const TSharedPtr<FJsonObject> RowData =
+      GetAssetData()->GetObjectField(TEXT("Rows"));
+  if (!RowData.IsValid()) {
+    UE_LOG(LogJsonAsAsset, Error,
+           TEXT("CurveTable import failed for '%s': invalid Rows object."),
+           *GetAssetName());
+    return false;
+  }
 
-		UCurveTableAccessor* CurveTableAccessor = Cast<UCurveTableAccessor>(CurveTable);
-		CurveTableAccessor->ChangeTableMode(CurveTableMode);
-	}
+  /* Used to determine curve type */
+  ECurveTableMode CurveTableMode = ECurveTableMode::RichCurves;
+  {
+    if (FString CurveMode;
+        GetAssetData()->TryGetStringField(TEXT("CurveTableMode"), CurveMode))
+      CurveTableMode = static_cast<ECurveTableMode>(
+          StaticEnum<ECurveTableMode>()->GetValueByNameString(CurveMode));
 
-	/* Loop throughout row data, and deserialize */
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : RowData->Values) {
-		const TSharedPtr<FJsonObject> CurveData = Pair.Value->AsObject();
+    UCurveTableAccessor *CurveTableAccessor =
+        Cast<UCurveTableAccessor>(CurveTable);
+    if (!CurveTableAccessor) {
+      UE_LOG(LogJsonAsAsset, Error,
+             TEXT("CurveTable import failed for '%s': created asset is not the "
+                  "accessor subclass."),
+             *GetAssetName());
+      return false;
+    }
 
-		if (CurveTableMode == ECurveTableMode::RichCurves) {
-			FRichCurve& Curve = CurveTable->AddRichCurve(FName(*Pair.Key));
+    CurveTableAccessor->ChangeTableMode(CurveTableMode);
+  }
 
-			GetPropertySerializer()->DeserializeStruct(Curve.StaticStruct(), CurveData.ToSharedRef(), &Curve);
-		} else {
-			FSimpleCurve& Curve = CurveTable->AddSimpleCurve(FName(*Pair.Key));
-			
-			GetPropertySerializer()->DeserializeStruct(Curve.StaticStruct(), CurveData.ToSharedRef(), &Curve);
-		}
+  /* Loop throughout row data, and deserialize */
+  for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair : RowData->Values) {
+    if (!Pair.Value.IsValid() || Pair.Value->Type != EJson::Object ||
+        !Pair.Value->AsObject().IsValid()) {
+      UE_LOG(LogJsonAsAsset, Warning,
+             TEXT("CurveTable '%s': skipping malformed row '%s'."),
+             *GetAssetName(), *Pair.Key);
+      continue;
+    }
 
-		/* Update Curve Table */
-		CurveTable->OnCurveTableChanged().Broadcast();
-		CurveTable->Modify(true);
-	}
+    const TSharedPtr<FJsonObject> CurveData = Pair.Value->AsObject();
 
-	/* Handle edit changes, and add it to the content browser */
-	return OnAssetCreation(CurveTable);
+    if (CurveTableMode == ECurveTableMode::RichCurves) {
+      FRichCurve &Curve = CurveTable->AddRichCurve(FName(*Pair.Key));
+
+      GetPropertySerializer()->DeserializeStruct(
+          Curve.StaticStruct(), CurveData.ToSharedRef(), &Curve);
+    } else {
+      FSimpleCurve &Curve = CurveTable->AddSimpleCurve(FName(*Pair.Key));
+
+      GetPropertySerializer()->DeserializeStruct(
+          Curve.StaticStruct(), CurveData.ToSharedRef(), &Curve);
+    }
+
+    /* Update Curve Table */
+    CurveTable->OnCurveTableChanged().Broadcast();
+    CurveTable->Modify(true);
+  }
+
+  /* Handle edit changes, and add it to the content browser */
+  return OnAssetCreation(CurveTable);
 }

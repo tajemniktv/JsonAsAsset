@@ -5,94 +5,129 @@
 #include "Engine/UserDefinedEnum.h"
 #include "Kismet2/EnumEditorUtils.h"
 
-UObject* IUserDefinedEnumImporter::CreateAsset(UObject* CreatedAsset) {
-	return IImporter::CreateAsset(NewObject<UUserDefinedEnum>(GetPackage(), *GetAssetName(), RF_Public | RF_Standalone));
+UObject *IUserDefinedEnumImporter::CreateAsset(UObject *CreatedAsset) {
+  return IImporter::CreateAsset(NewObject<UUserDefinedEnum>(
+      GetPackage(), *GetAssetName(), RF_Public | RF_Standalone));
 }
 
 bool IUserDefinedEnumImporter::Import() {
-	/* Create the UserDefinedEnum */
-	UUserDefinedEnum* UserDefinedEnum = Create<UUserDefinedEnum>();
-	
-	UserDefinedEnum->SetMetaData(TEXT("BlueprintType"), TEXT("true"));
-	UserDefinedEnum->Modify();
+  /* Create the UserDefinedEnum */
+  UUserDefinedEnum *UserDefinedEnum = Create<UUserDefinedEnum>();
 
-	/* CppForm ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	UEnum::ECppForm CppForm = UEnum::ECppForm::Regular;
+  UserDefinedEnum->SetMetaData(TEXT("BlueprintType"), TEXT("true"));
+  UserDefinedEnum->Modify();
 
-	if (GetAssetData()->HasField(TEXT("CppForm"))) {
-		const FString CppForm_String = GetAssetData()->GetStringField(TEXT("CppForm"));
+  /* CppForm
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  UEnum::ECppForm CppForm = UEnum::ECppForm::Regular;
 
-		/*
-		 * Selector based on text
-		 * Seems like we can't use the normal EnumAsString because of some access error
-		 */
-		CppForm = CppForm_String == "Regular" ? UEnum::ECppForm::Regular : CppForm_String == "Namespaced" ? UEnum::ECppForm::Namespaced : UEnum::ECppForm::EnumClass;
-	}
+  if (GetAssetData()->HasField(TEXT("CppForm"))) {
+    const FString CppForm_String =
+        GetAssetData()->GetStringField(TEXT("CppForm"));
 
-	/* EnumNames ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	if (GetAssetData()->HasTypedField<EJson::Object>(TEXT("Names"))) {
-		const TSharedPtr<FJsonObject> Names = GetAssetData()->GetObjectField(TEXT("Names"));
+    /*
+     * Selector based on text
+     * Seems like we can't use the normal EnumAsString because of some access
+     * error
+     */
+    CppForm = CppForm_String == "Regular"      ? UEnum::ECppForm::Regular
+              : CppForm_String == "Namespaced" ? UEnum::ECppForm::Namespaced
+                                               : UEnum::ECppForm::EnumClass;
+  }
 
-		/* Final EnumNames variable */
-		TArray<TPair<FName, int64>> EnumNames;
+  /* EnumNames
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  if (GetAssetData()->HasTypedField<EJson::Object>(TEXT("Names"))) {
+    const TSharedPtr<FJsonObject> Names =
+        GetAssetData()->GetObjectField(TEXT("Names"));
 
-		int32 EntryCount = Names->Values.Num();
-		
-		for (const auto& Pair : Names->Values) {
-			/* Last entry is the _MAX name, automatically created by the engine */
-			if (--EntryCount == 0) break;
+    /* Final EnumNames variable */
+    TArray<TPair<FName, int64>> EnumNames;
 
-			EnumNames.Emplace(FName(*Pair.Key), static_cast<int64>(Pair.Value->AsNumber()));
-		}
+    int32 EntryCount = Names->Values.Num();
 
-		/* Update the enumeration with the enum names */
-		UserDefinedEnum->SetEnums(EnumNames, CppForm
-			#if ENGINE_UE5 || ((ENGINE_UE4 && ENGINE_MINOR_VERSION >= 26) && !(ENGINE_MINOR_VERSION == 26 && ENGINE_PATCH_VERSION == 0))
-			, EEnumFlags::None, true
-			#endif
-		);
-	}
-	
-	/* DisplayNameMap ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	TArray<TSharedPtr<FJsonValue>> DisplayNameMap = GetAssetData()->GetArrayField(TEXT("DisplayNameMap"));
-	TMap<FName, FText> DisplayNames;
+    for (const auto &Pair : Names->Values) {
+      /* Last entry is the _MAX name, automatically created by the engine */
+      if (--EntryCount == 0)
+        break;
 
-	for (const TSharedPtr<FJsonValue>& DisplayEntry : DisplayNameMap) {
-		if (!DisplayEntry.IsValid()) continue;
+      EnumNames.Emplace(FName(*Pair.Key),
+                        static_cast<int64>(Pair.Value->AsNumber()));
+    }
 
-		TSharedPtr<FJsonObject> EntryObject = DisplayEntry->AsObject(); {
-			if (!EntryObject.IsValid()) continue;
-		}
+    /* Update the enumeration with the enum names */
+    UserDefinedEnum->SetEnums(EnumNames, CppForm
+#if ENGINE_UE5 || ((ENGINE_UE4 && ENGINE_MINOR_VERSION >= 26) &&               \
+                   !(ENGINE_MINOR_VERSION == 26 && ENGINE_PATCH_VERSION == 0))
+                              ,
+                              EEnumFlags::None, true
+#endif
+    );
+  }
 
-		TSharedPtr<FJsonObject> ValueObject = EntryObject->GetObjectField(TEXT("Value")); {
-			if (!ValueObject.IsValid()) continue;
-		}
+  /* DisplayNameMap
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  if (!GetAssetData().IsValid() ||
+      !GetAssetData()->HasField(TEXT("DisplayNameMap"))) {
+    return OnAssetCreation(UserDefinedEnum);
+  }
 
-		/* Retrieve properties */
-		FName EnumKey = *EntryObject->GetStringField(TEXT("Key"));
-		FString TextNamespace = ValueObject->GetStringField(TEXT("Namespace"));
-		FString UniqueKey = ValueObject->GetStringField(TEXT("Key"));
-		FString SourceString = ValueObject->GetStringField(TEXT("SourceString"));
+  TArray<TSharedPtr<FJsonValue>> DisplayNameMap =
+      GetAssetData()->GetArrayField(TEXT("DisplayNameMap"));
+  TMap<FName, FText> DisplayNames;
 
-		if (ValueObject->HasField(TEXT("CultureInvariantString"))) {
-			DisplayNames.Add(EnumKey, FText::FromString(*ValueObject->GetStringField(TEXT("CultureInvariantString"))));
-		} else {
-			/* TODO: Add LocalizedString */
-			DisplayNames.Add(EnumKey, FInternationalization::ForUseOnlyByLocMacroAndGraphNodeTextLiterals_CreateText(*SourceString, *TextNamespace, *UniqueKey));
-		}
-	}
+  for (const TSharedPtr<FJsonValue> &DisplayEntry : DisplayNameMap) {
+    if (!DisplayEntry.IsValid() || DisplayEntry->Type != EJson::Object ||
+        !DisplayEntry->AsObject().IsValid())
+      continue;
 
-	/* Set Display Names in the UserDefinedEnum */
-	for (const auto& Pair : DisplayNames) {
-		UserDefinedEnum->DisplayNameMap.Add(Pair.Key, Pair.Value);
-	}
+    TSharedPtr<FJsonObject> EntryObject = DisplayEntry->AsObject();
+    {
+      if (!EntryObject.IsValid())
+        continue;
+    }
 
-	/* Finalization ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	UserDefinedEnum->Modify();
-	UserDefinedEnum->PostEditChange();
+    TSharedPtr<FJsonObject> ValueObject =
+        EntryObject->GetObjectField(TEXT("Value"));
+    {
+      if (!ValueObject.IsValid())
+        continue;
+    }
 
-	FEnumEditorUtils::EnsureAllDisplayNamesExist(UserDefinedEnum);
+    /* Retrieve properties */
+    FName EnumKey = *EntryObject->GetStringField(TEXT("Key"));
+    FString TextNamespace = ValueObject->GetStringField(TEXT("Namespace"));
+    FString UniqueKey = ValueObject->GetStringField(TEXT("Key"));
+    FString SourceString = ValueObject->GetStringField(TEXT("SourceString"));
 
-	/* Handle edit changes, and add it to the content browser */
-	return OnAssetCreation(UserDefinedEnum);
+    if (ValueObject->HasField(TEXT("CultureInvariantString"))) {
+      DisplayNames.Add(EnumKey, FText::FromString(*ValueObject->GetStringField(
+                                    TEXT("CultureInvariantString"))));
+    } else {
+      /* TODO: Add LocalizedString */
+      DisplayNames.Add(
+          EnumKey,
+          FText::AsLocalizable_Advanced(*TextNamespace, *UniqueKey,
+                                        *SourceString));
+    }
+  }
+
+  /* Set Display Names in the UserDefinedEnum */
+  for (const auto &Pair : DisplayNames) {
+    UserDefinedEnum->DisplayNameMap.Add(Pair.Key, Pair.Value);
+  }
+
+  /* Finalization
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  UserDefinedEnum->Modify();
+  UserDefinedEnum->PostEditChange();
+
+  FEnumEditorUtils::EnsureAllDisplayNamesExist(UserDefinedEnum);
+
+  /* Handle edit changes, and add it to the content browser */
+  return OnAssetCreation(UserDefinedEnum);
 }

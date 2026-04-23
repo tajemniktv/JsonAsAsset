@@ -3,351 +3,473 @@
 #include "Serializers/ObjectSerializer.h"
 #include "Engine/Compatibility.h"
 
+#include "Animation/WidgetAnimation.h"
+#include "Components/ExponentialHeightFogComponent.h"
+#include "Components/PostProcessComponent.h"
 #include "Serializers/PropertySerializer.h"
 #include "UObject/Package.h"
 #include "Utilities/JsonUtilities.h"
-#include "Components/ExponentialHeightFogComponent.h"
-#include "Components/PostProcessComponent.h"
+
 
 /* ReSharper disable once CppDeclaratorNeverUsed */
 DECLARE_LOG_CATEGORY_CLASS(LogJsonAsAssetObjectSerializer, All, All);
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 
-/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ */
 
-UObjectSerializer::UObjectSerializer(): Parent(nullptr), PropertySerializer(nullptr) { }
+UObjectSerializer::UObjectSerializer()
+    : Parent(nullptr), PropertySerializer(nullptr) {}
 
-void UObjectSerializer::SetupExports(const TArray<TSharedPtr<FJsonValue>>& InObjects) {
-	Exports = InObjects;
+void UObjectSerializer::SetupExports(
+    const TArray<TSharedPtr<FJsonValue>> &InObjects) {
+  Exports = InObjects;
 }
 
 /* New Generation */
-void UObjectSerializer::SpawnExport(FUObjectExport* Export) {
-	if (Export->Object != nullptr) return;
+void UObjectSerializer::SpawnExport(FUObjectExport *Export,
+                                    const bool bImportInPlace) {
+  if (!Export || !Export->JsonObject.IsValid()) {
+    return;
+  }
 
-	const UClass* Class = Export->GetClass();
-	if (!Class) return;
+  if (!bImportInPlace && Export->Object != nullptr)
+    return;
 
-	const FString Outer = GetOuterFromObjectOuter(Export->JsonObject->TryGetField(TEXT("Outer")));
-	UObject* ObjectOuter = nullptr;
+  const UClass *Class = Export->GetClass();
+  if (!Class)
+    return;
 
-	/* Find the outer */
-	if (FUObjectExport* OuterExport = PropertySerializer->ExportsContainer->Find(Outer); OuterExport->JsonObject.IsValid()) {
-		if (OuterExport->Object == nullptr) {
-			SpawnExport(OuterExport);
-		}
-		
-		ObjectOuter = OuterExport->Object;
-	}
+  const FString Outer =
+      GetOuterFromObjectOuter(Export->JsonObject->TryGetField(TEXT("Outer")));
+  UObject *ObjectOuter = nullptr;
 
-	/* Find the blueprint outer */
-	if (!Outer.IsEmpty()) {
-		FString PotentialBPName;
-		Outer.Split("_C", &PotentialBPName, nullptr, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
-		
-		if (FUObjectExport* OuterExport = PropertySerializer->ExportsContainer->Find(PotentialBPName); OuterExport->JsonObject.IsValid()) {
-			if (OuterExport->Object == nullptr) {
-				SpawnExport(OuterExport);
-			}
+  /* Find the outer */
+  if (FUObjectExport *OuterExport =
+          PropertySerializer->ExportsContainer->Find(Outer);
+      OuterExport && OuterExport->JsonObject.IsValid()) {
+    if (OuterExport->Object == nullptr) {
+      SpawnExport(OuterExport);
+    }
 
-			if (OuterExport->Object) {
-				ObjectOuter = OuterExport->Object;
-			}
-		}
-	}
-	
-	/* Find the outer using the tree segment */
-	const TArray<FName> TreeSegments = Export->GetOuterTreeSegments(true);
+    ObjectOuter = OuterExport->Object;
+  }
 
-	if (TreeSegments.Num() > 0) {
-		if (FUObjectExport* OuterExport = PropertySerializer->ExportsContainer->FindByTreeSegment(TreeSegments); !IsEmpty(OuterExport->JsonObject->Values)) {
-			if (OuterExport->Object == nullptr) {
-				SpawnExport(OuterExport);
-			}
-		
-			if (OuterExport->Object) {
-				ObjectOuter = OuterExport->Object;
-			}
-		}
-	}
+  /* Find the blueprint outer */
+  if (!Outer.IsEmpty()) {
+    FString PotentialBPName;
+    Outer.Split("_C", &PotentialBPName, nullptr, ESearchCase::CaseSensitive,
+                ESearchDir::FromEnd);
 
-	if (Export->Object || !ObjectOuter) return;
+    if (FUObjectExport *OuterExport =
+            PropertySerializer->ExportsContainer->Find(PotentialBPName);
+        OuterExport && OuterExport->JsonObject.IsValid()) {
+      if (OuterExport->Object == nullptr) {
+        SpawnExport(OuterExport);
+      }
 
-	/* Default flags */
-	EObjectFlags Flags = RF_Public | RF_Transactional;
+      if (OuterExport->Object) {
+        ObjectOuter = OuterExport->Object;
+      }
+    }
+  }
 
-	/* Parse the flags back into EObjectFlags, important for component archetypes */
-	if (Export->Has("Flags")) {
-		Flags = ParseObjectFlags(Export->GetString("Flags"));
-	}
-	
-	Export->Object = NewObject<UObject>(ObjectOuter, Class, Export->GetName(), Flags);
-	DeserializeObjectProperties(Export->GetProperties(), Export->Object);
+  /* Find the outer using the tree segment */
+  const TArray<FName> TreeSegments = Export->GetOuterTreeSegments(true);
+
+  if (TreeSegments.Num() > 0) {
+    if (FUObjectExport *OuterExport =
+            PropertySerializer->ExportsContainer->FindByTreeSegment(
+                TreeSegments);
+        OuterExport && OuterExport->JsonObject.IsValid() &&
+        !IsEmpty(OuterExport->JsonObject->Values)) {
+      if (OuterExport->Object == nullptr) {
+        SpawnExport(OuterExport);
+      }
+
+      if (OuterExport->Object) {
+        ObjectOuter = OuterExport->Object;
+      }
+    }
+  }
+
+  if (!ObjectOuter)
+    return;
+
+  /* Default flags */
+  EObjectFlags Flags = RF_Public | RF_Transactional;
+
+  /* Parse the flags back into EObjectFlags, important for component archetypes
+   */
+  if (Export->Has("Flags")) {
+    Flags = ParseObjectFlags(Export->GetString("Flags"));
+  }
+
+  if (!Export->Object) {
+    UObject *ExistingObject = FindObject<UObject>(ObjectOuter, *Export->GetName().ToString());
+    if (ExistingObject) {
+      if (ExistingObject->IsA(Class)) {
+        Export->Object = ExistingObject;
+      } else {
+        UE_LOG(LogJsonAsAssetObjectSerializer, Warning,
+               TEXT("SpawnExport skipped '%s': existing object class mismatch (expected '%s', found '%s')."),
+               *Export->GetName().ToString(), *Class->GetName(),
+               *ExistingObject->GetClass()->GetName());
+        return;
+      }
+    }
+  }
+
+  if (!Export->Object) {
+    FName ObjectName = Export->GetName();
+
+    if (Class->IsChildOf(UWidgetAnimation::StaticClass())) {
+      FString AnimationName = ObjectName.ToString();
+      AnimationName.Split(TEXT("_INST"), &AnimationName, nullptr,
+                          ESearchCase::CaseSensitive);
+      if (!AnimationName.IsEmpty()) {
+        ObjectName = FName(AnimationName);
+      }
+    }
+
+    Export->Object =
+        NewObject<UObject>(ObjectOuter, Class, ObjectName, Flags);
+  }
+
+  if (Export->Object && Export->GetProperties().IsValid()) {
+    DeserializeObjectProperties(Export->GetProperties(), Export->Object);
+  }
 }
 
-void UObjectSerializer::SetPropertySerializer(UPropertySerializer* NewPropertySerializer) {
-	check(NewPropertySerializer);
+void UObjectSerializer::SetPropertySerializer(
+    UPropertySerializer *NewPropertySerializer) {
+  check(NewPropertySerializer);
 
-	PropertySerializer = NewPropertySerializer;
-	NewPropertySerializer->ObjectSerializer = this;
+  PropertySerializer = NewPropertySerializer;
+  NewPropertySerializer->ObjectSerializer = this;
 }
 
-void UObjectSerializer::SetExportForDeserialization(const TSharedPtr<FJsonObject>& JsonObject, UObject* Object) {
-	ExportsToNotDeserialize.Add(JsonObject->GetStringField(TEXT("Name")));
-	ConstructedObjects.Add(JsonObject->GetStringField(TEXT("Name")), Object);
+void UObjectSerializer::SetExportForDeserialization(
+    const TSharedPtr<FJsonObject> &JsonObject, UObject *Object) {
+  ExportsToNotDeserialize.Add(JsonObject->GetStringField(TEXT("Name")));
+  ConstructedObjects.Add(JsonObject->GetStringField(TEXT("Name")), Object);
 }
 
-void UObjectSerializer::DeserializeExports(FUObjectExportContainer* Container, const bool CreateObjects) {
-	if (CreateObjects) {
-		TMap<TSharedPtr<FJsonObject>, UObject*> ExportsMap;
-		
-		for (FUObjectExport* Export : Container->Exports) {
-			FString Type = Export->GetType().ToString();
-		
-			/* Check if it's not supposed to be deserialized */
-			if (ExportsToNotDeserialize.Contains(Export->GetName().ToString())) continue;
+void UObjectSerializer::DeserializeExports(FUObjectExportContainer *Container,
+                                           const bool CreateObjects) {
+  if (CreateObjects) {
+    TMap<TSharedPtr<FJsonObject>, UObject *> ExportsMap;
 
-			if (WhitelistedTypes.Num() > 0) {
-				bool bMatchFound = false;
+    for (FUObjectExport *Export : Container->Exports) {
+      FString Type = Export->GetType().ToString();
 
-				for (const FString& Whitelisted : WhitelistedTypes) {
-					if (Type.Contains(Whitelisted)) {
-						bMatchFound = true;
-						break;
-					}
-				}
+      /* Check if it's not supposed to be deserialized */
+      if (ExportsToNotDeserialize.Contains(Export->GetName().ToString()))
+        continue;
 
-				if (!bMatchFound) {
-					continue;
-				}
-			}
+      if (WhitelistedTypes.Num() > 0) {
+        bool bMatchFound = false;
 
-			if (WhitelistedTypesStartingWith.Num() > 0) {
-				bool bMatchFound = false;
+        for (const FString &Whitelisted : WhitelistedTypes) {
+          if (Type.Contains(Whitelisted)) {
+            bMatchFound = true;
+            break;
+          }
+        }
 
-				for (const FString& Whitelisted : WhitelistedTypesStartingWith) {
-					if (Type.StartsWith(Whitelisted)) {
-						bMatchFound = true;
-						break;
-					}
-				}
+        if (!bMatchFound) {
+          continue;
+        }
+      }
 
-				if (!bMatchFound) {
-					continue;
-				}
-			}
+      if (WhitelistedTypesStartingWith.Num() > 0) {
+        bool bMatchFound = false;
 
-			if (WhitelistedTreeSegments.Num() > 0) {
-				auto TreeSegments = Export->GetOuterTreeSegments(true);
-			
-				if (TreeSegments.Num() > 0 && WhitelistedTreeSegments != TreeSegments) {
-					continue;
-				}
-			}
-			
-			if (BlacklistedTypes.Num() > 0) {
-				if (BlacklistedTypes.Contains(Type)) {
-					continue;
-				}
-			}
-		
-			if (Type == "NavCollision") continue;
-			
-			DeserializeExport(Export, ExportsMap);
-		}
+        for (const FString &Whitelisted : WhitelistedTypesStartingWith) {
+          if (Type.StartsWith(Whitelisted)) {
+            bMatchFound = true;
+            break;
+          }
+        }
 
-		for (const auto& Pair : ExportsMap) {
-			TSharedPtr<FJsonObject> Properties = Pair.Key;
-			UObject* Object = Pair.Value;
+        if (!bMatchFound) {
+          continue;
+        }
+      }
 
-			DeserializeObjectProperties(Properties, Object);
-		}
-	}
+      if (WhitelistedTreeSegments.Num() > 0) {
+        auto TreeSegments = Export->GetOuterTreeSegments(true);
+
+        if (TreeSegments.Num() > 0 && WhitelistedTreeSegments != TreeSegments) {
+          continue;
+        }
+      }
+
+      if (BlacklistedTypes.Num() > 0) {
+        if (BlacklistedTypes.Contains(Type)) {
+          continue;
+        }
+      }
+
+      if (Type == "NavCollision")
+        continue;
+
+      DeserializeExport(Export, ExportsMap);
+    }
+
+    for (const auto &Pair : ExportsMap) {
+      TSharedPtr<FJsonObject> Properties = Pair.Key;
+      UObject *Object = Pair.Value;
+
+      DeserializeObjectProperties(Properties, Object);
+    }
+  }
 }
 
-void UObjectSerializer::DeserializeExport(FUObjectExport* Export, TMap<TSharedPtr<FJsonObject>, UObject*>& ExportsMap) {
-	if (Export->Object != nullptr) return;
+void UObjectSerializer::DeserializeExport(
+    FUObjectExport *Export,
+    TMap<TSharedPtr<FJsonObject>, UObject *> &ExportsMap) {
+  if (Export->Object != nullptr)
+    return;
 
-	const TSharedPtr<FJsonObject> ExportObject = Export->JsonObject;
+  const TSharedPtr<FJsonObject> ExportObject = Export->JsonObject;
 
-	/* No name means no export */
-	if (!ExportObject->HasField(TEXT("Name"))) return;
+  /* No name means no export */
+  if (!ExportObject->HasField(TEXT("Name")))
+    return;
 
-	const FString Name = ExportObject->GetStringField(TEXT("Name"));
-	const FString Type = ExportObject->GetStringField(TEXT("Type")).Replace(TEXT("CommonWidgetSwitcher"), TEXT("CommonActivatableWidgetSwitcher"));
-		
-	/* Check if it's not supposed to be deserialized */
-	if (ExportsToNotDeserialize.Contains(Name)) return;
-	if (Type == "BodySetup" || Type == "NavCollision") return;
+  const FString Name = ExportObject->GetStringField(TEXT("Name"));
+  const FString Type = ExportObject->GetStringField(TEXT("Type"))
+                           .Replace(TEXT("CommonWidgetSwitcher"),
+                                    TEXT("CommonActivatableWidgetSwitcher"));
 
-	FString ClassName = ExportObject->GetStringField(TEXT("Class"));
+  /* Check if it's not supposed to be deserialized */
+  if (ExportsToNotDeserialize.Contains(Name))
+    return;
+  if (Type == "BodySetup" || Type == "NavCollision")
+    return;
 
-	if (ExportObject->HasField(TEXT("Template"))) {
-		auto TemplateObject = Export->GetObject("Template");
-		ClassName = ReadPathFromObject(TemplateObject).Replace(TEXT("Default__"), TEXT(""));
-	}
-	
-	if (ClassName.Contains("'")) {
-		ClassName.Split("'", nullptr, &ClassName, ESearchCase::IgnoreCase, ESearchDir::FromStart);
-		ClassName.Split("'", &ClassName, nullptr, ESearchCase::IgnoreCase, ESearchDir::FromStart);
-	}
-	
-	const UClass* Class = FindClassByType(ClassName);
-	
-	if (!Class) {
-		Class = FindClassByType(Type);
-	}
+  FString ClassName = ExportObject->GetStringField(TEXT("Class"));
 
-	if (!Class) return;
+  if (ExportObject->HasField(TEXT("Template"))) {
+    auto TemplateObject = Export->GetObject("Template");
+    ClassName =
+        ReadPathFromObject(TemplateObject).Replace(TEXT("Default__"), TEXT(""));
+  }
 
-	const FString Outer = GetOuterFromObjectOuter(ExportObject->TryGetField(TEXT("Outer")));
-	UObject* ObjectOuter = nullptr;
+  if (ClassName.Contains("'")) {
+    ClassName.Split("'", nullptr, &ClassName, ESearchCase::IgnoreCase,
+                    ESearchDir::FromStart);
+    ClassName.Split("'", &ClassName, nullptr, ESearchCase::IgnoreCase,
+                    ESearchDir::FromStart);
+  }
 
-	if (FUObjectExport* FoundExport = PropertySerializer->ExportsContainer->Find(Outer); FoundExport->JsonObject.IsValid()) {
-		if (FoundExport->Object == nullptr) {
-			DeserializeExport(FoundExport, ExportsMap);
-		}
-		
-		UObject* FoundObject = FoundExport->Object;
-		ObjectOuter = FoundObject;
-	}
+  const UClass *Class = FindClassByType(ClassName);
 
-	const TArray<FName> TreeSegments = Export->GetOuterTreeSegments(true);
+  if (!Class) {
+    Class = FindClassByType(Type);
+  }
 
-	if (TreeSegments.Num() > 0) {
-		if (FUObjectExport* FoundExport = PropertySerializer->ExportsContainer->FindByTreeSegment(TreeSegments); !IsEmpty(FoundExport->JsonObject->Values)) {
-			if (FoundExport->Object == nullptr) {
-				DeserializeExport(FoundExport, ExportsMap);
-			}
-		
-			UObject* FoundObject = FoundExport->Object;
-			ObjectOuter = FoundObject;
-		}
-	}
+  if (!Class)
+    return;
 
-	if (UObject** ConstructedObject = ConstructedObjects.Find(Outer)) {
-		ObjectOuter = *ConstructedObject;
-	}
+  const FString Outer =
+      GetOuterFromObjectOuter(ExportObject->TryGetField(TEXT("Outer")));
+  UObject *ObjectOuter = nullptr;
 
-	if (Export->Object) return;
-	
-	if (ObjectOuter == nullptr) {
-		ObjectOuter = Parent;
-	}
+  if (FUObjectExport *FoundExport =
+          PropertySerializer->ExportsContainer->Find(Outer);
+      FoundExport && FoundExport->JsonObject.IsValid()) {
+    if (FoundExport->Object == nullptr) {
+      DeserializeExport(FoundExport, ExportsMap);
+    }
 
-	UObject* NewUObject = NewObject<UObject>(ObjectOuter, Class, FName(*Name), RF_Public | RF_Transactional);
+    UObject *FoundObject = FoundExport->Object;
+    ObjectOuter = FoundObject;
+  }
 
-	if (ExportObject->HasField(TEXT("Properties"))) {
-		const TSharedPtr<FJsonObject> Properties = ExportObject->GetObjectField(TEXT("Properties"));
+  const TArray<FName> TreeSegments = Export->GetOuterTreeSegments(true);
 
-		ExportsMap.Add(Properties, NewUObject);
-	} else {
-		ExportsMap.Add(ExportObject, NewUObject);
-	}
+  if (TreeSegments.Num() > 0) {
+    if (FUObjectExport *FoundExport =
+            PropertySerializer->ExportsContainer->FindByTreeSegment(
+                TreeSegments);
+        FoundExport && FoundExport->JsonObject.IsValid() &&
+        !IsEmpty(FoundExport->JsonObject->Values)) {
+      if (FoundExport->Object == nullptr) {
+        DeserializeExport(FoundExport, ExportsMap);
+      }
 
-	/* Add it to the referenced objects */
-	Export->Object = NewUObject;
+      UObject *FoundObject = FoundExport->Object;
+      ObjectOuter = FoundObject;
+    }
+  }
+
+  if (UObject **ConstructedObject = ConstructedObjects.Find(Outer)) {
+    ObjectOuter = *ConstructedObject;
+  }
+
+  if (Export->Object)
+    return;
+
+  if (ObjectOuter == nullptr) {
+    ObjectOuter = Parent;
+  }
+
+  if (ObjectOuter == nullptr || !IsValid(ObjectOuter)) {
+    return;
+  }
+
+  UObject *NewUObject = NewObject<UObject>(ObjectOuter, Class, FName(*Name),
+                                           RF_Public | RF_Transactional);
+
+  if (ExportObject->HasField(TEXT("Properties"))) {
+    const TSharedPtr<FJsonObject> Properties =
+        ExportObject->GetObjectField(TEXT("Properties"));
+
+    ExportsMap.Add(Properties, NewUObject);
+  } else {
+    ExportsMap.Add(ExportObject, NewUObject);
+  }
+
+  /* Add it to the referenced objects */
+  Export->Object = NewUObject;
 }
 
-void UObjectSerializer::DeserializeObjectProperties(const TSharedPtr<FJsonObject>& Properties, UObject* Object) const {
-	if (Object == nullptr) return;
+void UObjectSerializer::DeserializeObjectProperties(
+    const TSharedPtr<FJsonObject> &Properties, UObject *Object) const {
+  if (Object == nullptr || !IsValid(Object) || !Properties.IsValid() ||
+      PropertySerializer == nullptr)
+    return;
 
-	const UClass* ObjectClass = Object->GetClass();
+  const UClass *ObjectClass = Object->GetClass();
+  if (ObjectClass == nullptr) {
+    return;
+  }
 
-	for (FProperty* Property = ObjectClass->PropertyLink; Property; Property = Property->PropertyLinkNext) {
-		FString PropertyName = Property->GetName();
+  for (FProperty *Property = ObjectClass->PropertyLink; Property;
+       Property = Property->PropertyLinkNext) {
+    FString PropertyName = Property->GetName();
 
-		if (!PropertySerializer->ShouldDeserializeProperty(Property)) continue;
+    if (!PropertySerializer->ShouldDeserializeProperty(Property))
+      continue;
 
-		void* PropertyValue = Property->ContainerPtrToValuePtr<void>(Object);
-		const bool HasHandledProperty = PassthroughPropertyHandler(Property, PropertyName, PropertyValue, Properties, PropertySerializer);
-		
-		/* Handler Specifically for Animation Blueprint Graph Nodes */
-		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property)) {
-			if (StructProperty->Struct->IsChildOf(FAnimNode_Base::StaticStruct())) {
-				void* StructPtr = StructProperty->ContainerPtrToValuePtr<void>(Object);
+    void *PropertyValue = Property->ContainerPtrToValuePtr<void>(Object);
+    const bool HasHandledProperty = PassthroughPropertyHandler(
+        Property, PropertyName, PropertyValue, Properties, PropertySerializer);
 
-				if (static_cast<FAnimNode_Base*>(StructPtr)) {
-					PropertySerializer->DeserializeStruct(StructProperty->Struct, Properties.ToSharedRef(), PropertyValue);
-				}
-			}
-		}
+    /* Handler Specifically for Animation Blueprint Graph Nodes */
+    if (const FStructProperty *StructProperty =
+            CastField<FStructProperty>(Property)) {
+      if (StructProperty->Struct->IsChildOf(FAnimNode_Base::StaticStruct())) {
+        void *StructPtr = StructProperty->ContainerPtrToValuePtr<void>(Object);
+
+        if (static_cast<FAnimNode_Base *>(StructPtr)) {
+          PropertySerializer->DeserializeStruct(
+              StructProperty->Struct, Properties.ToSharedRef(), PropertyValue);
+        }
+      }
+    }
 
 #if ENGINE_UE5
-		/* ExponentialHeightFog: Migration to new API */
-		if (Object->IsA<UExponentialHeightFogComponent>()) {
-			if (Property->NamePrivate == "FogInscatteringLuminance" && !Properties->Values.Contains("FogInscatteringLuminance")) {
-				PropertyName = "FogInscatteringColor";
-			}
+    /* ExponentialHeightFog: Migration to new API */
+    if (Object->IsA<UExponentialHeightFogComponent>()) {
+      if (Property->NamePrivate == "FogInscatteringLuminance" &&
+          !Properties->Values.Contains("FogInscatteringLuminance")) {
+        PropertyName = "FogInscatteringColor";
+      }
 
-			if (Property->NamePrivate == "DirectionalInscatteringLuminance" && !Properties->Values.Contains("DirectionalInscatteringLuminance")) {
-				PropertyName = "DirectionalInscatteringColor";
-			}
-		}
+      if (Property->NamePrivate == "DirectionalInscatteringLuminance" &&
+          !Properties->Values.Contains("DirectionalInscatteringLuminance")) {
+        PropertyName = "DirectionalInscatteringColor";
+      }
+    }
 #endif
-		
-		if (Properties->HasField(PropertyName) && !HasHandledProperty && PropertyName != "LODParentPrimitive" && PropertyName != "bIsCookedForEditor") {
-			const TSharedPtr<FJsonValue>& ValueObject = Properties->Values.FindChecked(PropertyName);
 
-			if (Property->ArrayDim == 1 || ValueObject->Type == EJson::Array) {
-				PropertySerializer->DeserializePropertyValue(Property, ValueObject.ToSharedRef(), PropertyValue);
-			}
-		}
-	}
-	
-	/* Volumes are not supported, yet. ;] */
-	if (UPostProcessComponent* PostProcessComponent = Cast<UPostProcessComponent>(Object)) {
-		PostProcessComponent->bUnbound = true;
-	}
+    if (Properties->HasField(PropertyName) && !HasHandledProperty &&
+        PropertyName != "LODParentPrimitive" &&
+        PropertyName != "bIsCookedForEditor") {
+      const TSharedPtr<FJsonValue> *ValueObjectPtr =
+          Properties->Values.Find(PropertyName);
+      if (ValueObjectPtr == nullptr || !ValueObjectPtr->IsValid()) {
+        continue;
+      }
 
-	/* This is a use case for importing maps and parsing static mesh components
-	 * using the object and property serializer, this was initially wanted to be
-	 * done completely without any manual work. (using the de-serializers)
-	 * 
-	 * However I don't think it's possible to do so. as I haven't seen any native
-	 * property that can do this using the data provided in UEParse.
-	 */
-	if (Properties->HasField(TEXT("LODData")) && Cast<UStaticMeshComponent>(Object)) {
-		UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(Object);
-		if (!StaticMeshComponent) return;
-		
-		TArray<TSharedPtr<FJsonValue>> ObjectLODData = Properties->GetArrayField(TEXT("LODData"));
-		int CurrentLOD = -1;
-		
-		for (const auto& CurrentLODValue : ObjectLODData) {
-			CurrentLOD++;
+      const TSharedPtr<FJsonValue> &ValueObject = *ValueObjectPtr;
 
-			const TSharedPtr<FJsonObject> CurrentLODObject = CurrentLODValue->AsObject();
+      if (Property->ArrayDim == 1 || ValueObject->Type == EJson::Array) {
+        PropertySerializer->DeserializePropertyValue(
+            Property, ValueObject.ToSharedRef(), PropertyValue);
+      }
+    }
+  }
 
-			/* Must contain vertex colors, or else it's an empty LOD */
-			if (!CurrentLODObject->HasField(TEXT("OverrideVertexColors"))) continue;
+  /* Volumes are not supported, yet. ;] */
+  if (UPostProcessComponent *PostProcessComponent =
+          Cast<UPostProcessComponent>(Object)) {
+    PostProcessComponent->bUnbound = true;
+  }
 
-			const TSharedPtr<FJsonObject> OverrideVertexColorsObject = CurrentLODObject->GetObjectField(TEXT("OverrideVertexColors"));
+  /* This is a use case for importing maps and parsing static mesh components
+   * using the object and property serializer, this was initially wanted to be
+   * done completely without any manual work. (using the de-serializers)
+   *
+   * However I don't think it's possible to do so. as I haven't seen any native
+   * property that can do this using the data provided in UEParse.
+   */
+  if (Properties->HasField(TEXT("LODData")) &&
+      Cast<UStaticMeshComponent>(Object)) {
+    UStaticMeshComponent *StaticMeshComponent =
+        Cast<UStaticMeshComponent>(Object);
+    if (!StaticMeshComponent)
+      return;
 
-			if (!OverrideVertexColorsObject->HasField(TEXT("Data"))) continue;
+    TArray<TSharedPtr<FJsonValue>> ObjectLODData =
+        Properties->GetArrayField(TEXT("LODData"));
+    int CurrentLOD = -1;
 
-			const int32 NumVertices = OverrideVertexColorsObject->GetIntegerField(TEXT("NumVertices"));
-			const TArray<TSharedPtr<FJsonValue>> DataArray = OverrideVertexColorsObject->GetArrayField(TEXT("Data"));
+    for (const auto &CurrentLODValue : ObjectLODData) {
+      CurrentLOD++;
 
-			/* Template of the target data */
-			FString Output = FString::Printf(TEXT("CustomLODData LOD=%d, ColorVertexData(%d)=("), CurrentLOD, NumVertices);
+      const TSharedPtr<FJsonObject> CurrentLODObject =
+          CurrentLODValue->AsObject();
 
-			/* Append the colors in the expected format */
-			for (int32 i = 0; i < DataArray.Num(); ++i) {
-				FString ColorValue = DataArray.operator[](i)->AsString();
-				Output.Append(ColorValue);
+      /* Must contain vertex colors, or else it's an empty LOD */
+      if (!CurrentLODObject->HasField(TEXT("OverrideVertexColors")))
+        continue;
 
-				/* Add a comma unless it's the last element */
-				if (i < DataArray.Num() - 1) {
-					Output.Append(TEXT(","));
-				}
-			}
+      const TSharedPtr<FJsonObject> OverrideVertexColorsObject =
+          CurrentLODObject->GetObjectField(TEXT("OverrideVertexColors"));
 
-			Output.Append(TEXT(")"));
-		
-			StaticMeshComponent->ImportCustomProperties(*Output, GWarn);
-		}
-	}
+      if (!OverrideVertexColorsObject->HasField(TEXT("Data")))
+        continue;
+
+      const int32 NumVertices =
+          OverrideVertexColorsObject->GetIntegerField(TEXT("NumVertices"));
+      const TArray<TSharedPtr<FJsonValue>> DataArray =
+          OverrideVertexColorsObject->GetArrayField(TEXT("Data"));
+
+      /* Template of the target data */
+      FString Output =
+          FString::Printf(TEXT("CustomLODData LOD=%d, ColorVertexData(%d)=("),
+                          CurrentLOD, NumVertices);
+
+      /* Append the colors in the expected format */
+      for (int32 i = 0; i < DataArray.Num(); ++i) {
+        FString ColorValue = DataArray.operator[](i)->AsString();
+        Output.Append(ColorValue);
+
+        /* Add a comma unless it's the last element */
+        if (i < DataArray.Num() - 1) {
+          Output.Append(TEXT(","));
+        }
+      }
+
+      Output.Append(TEXT(")"));
+
+      StaticMeshComponent->ImportCustomProperties(*Output, GWarn);
+    }
+  }
 }
 
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION

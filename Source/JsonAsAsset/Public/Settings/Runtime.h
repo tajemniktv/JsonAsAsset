@@ -18,6 +18,7 @@ struct FJRuntime {
 
 	FJCloudProfile Profile;
 	FDirectoryPath ExportDirectory;
+	bool bBetterMartPresetActive = false;
 
 	bool bEnableToolbarToggling;
 
@@ -25,6 +26,7 @@ struct FJRuntime {
 	bool IsOlderUE4Target() const;
 	bool IsUE5() const;
 	bool IsUE4() const;
+	bool IsBetterMartPresetActive() const;
 
 	/* Update Functions ~~~~~~~~~~~ */
 	void Update();

@@ -7,126 +7,218 @@
 #include "Settings/Runtime.h"
 #include "Utilities/JsonUtilities.h"
 
-UObject* IPhysicsAssetImporter::CreateAsset(UObject* CreatedAsset) {
-	return IImporter::CreateAsset(NewObject<UPhysicsAsset>(GetPackage(), UPhysicsAsset::StaticClass(), *GetAssetName(), RF_Public | RF_Standalone));
+UObject *IPhysicsAssetImporter::CreateAsset(UObject *CreatedAsset) {
+  return IImporter::CreateAsset(
+      NewObject<UPhysicsAsset>(GetPackage(), UPhysicsAsset::StaticClass(),
+                               *GetAssetName(), RF_Public | RF_Standalone));
 }
 
 bool IPhysicsAssetImporter::Import() {
-	/* CollisionDisableTable is required to port physics assets */
-	if (!GetAssetData()->HasField(TEXT("CollisionDisableTable"))) {
-		SpawnPrompt("Missing CollisionDisableTable", "The provided physics asset json file is missing the 'CollisionDisableTable' property. This property is required.");
+  /* CollisionDisableTable is required to port physics assets */
+  if (!GetAssetData()->HasField(TEXT("CollisionDisableTable"))) {
+    SpawnPrompt("Missing CollisionDisableTable",
+                "The provided physics asset json file is missing the "
+                "'CollisionDisableTable' property. This property is required.");
 
-		return false;
-	}
+    return false;
+  }
 
-	UPhysicsAsset* PhysicsAsset = Create<UPhysicsAsset>();
+  UPhysicsAsset *PhysicsAsset = Create<UPhysicsAsset>();
 
-	DeserializeExports(PhysicsAsset, false);
-	FUObjectExportContainer* ExportContainer = GetExportContainer();
+  DeserializeExports(PhysicsAsset, false);
+  FUObjectExportContainer *ExportContainer = GetExportContainer();
 
-	/* SkeletalBodySetups ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	const FString SkeletalBodySetupsName = !GJsonAsAssetRuntime.IsOlderUE4Target() ? "SkeletalBodySetups" : "BodySetup";
+  /* SkeletalBodySetups
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  const FString SkeletalBodySetupsName = !GJsonAsAssetRuntime.IsOlderUE4Target()
+                                             ? "SkeletalBodySetups"
+                                             : "BodySetup";
 
-	ProcessJsonArrayField(GetAssetData(), SkeletalBodySetupsName, [&](const TSharedPtr<FJsonObject>& ObjectField) {
-		const FName ExportName = GetExportNameOfSubobject(ObjectField->GetStringField(TEXT("ObjectName")));
-		const TSharedPtr<FJsonObject> ExportJson = ExportContainer->Find(ExportName)->JsonObject;
+  ProcessJsonArrayField(
+      GetAssetData(), SkeletalBodySetupsName,
+      [&](const TSharedPtr<FJsonObject> &ObjectField) {
+        const FName ExportName = GetExportNameOfSubobject(
+            ObjectField->GetStringField(TEXT("ObjectName")));
+        FUObjectExport *FoundExport =
+            ExportContainer ? ExportContainer->Find(ExportName) : nullptr;
+        if (!FoundExport || !FoundExport->JsonObject.IsValid()) {
+          UE_LOG(LogJsonAsAsset, Warning,
+                 TEXT("Skipping missing SkeletalBodySetup export '%s'"),
+                 *ExportName.ToString());
+          return;
+        }
 
-		const TSharedPtr<FJsonObject> ExportProperties = ExportJson->GetObjectField(TEXT("Properties"));
-		const FName BoneName = FName(*ExportProperties->GetStringField(TEXT("BoneName")));
-		
-		USkeletalBodySetup* BodySetup = CreateNewBody(PhysicsAsset, ExportName, BoneName);
+        const TSharedPtr<FJsonObject> ExportJson = FoundExport->JsonObject;
 
-		GetObjectSerializer()->DeserializeObjectProperties(ExportProperties, BodySetup);
-	});
+        const TSharedPtr<FJsonObject> ExportProperties =
+            ExportJson->GetObjectField(TEXT("Properties"));
+        const FName BoneName =
+            FName(*ExportProperties->GetStringField(TEXT("BoneName")));
 
-	/* For caching. IMPORTANT! DO NOT REMOVE! */
-	PhysicsAsset->UpdateBodySetupIndexMap();
-	PhysicsAsset->UpdateBoundsBodiesArray();
+        USkeletalBodySetup *BodySetup =
+            CreateNewBody(PhysicsAsset, ExportName, BoneName);
 
-	/* CollisionDisableTable ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	TArray<TSharedPtr<FJsonValue>> CollisionDisableTable = GetAssetData()->GetArrayField(TEXT("CollisionDisableTable"));
+        GetObjectSerializer()->DeserializeObjectProperties(ExportProperties,
+                                                           BodySetup);
+      });
 
-	for (const auto& TableJSONElement : CollisionDisableTable) {
-		const TSharedPtr<FJsonObject> TableObjectElement = TableJSONElement->AsObject();
+  /* For caching. IMPORTANT! DO NOT REMOVE! */
+  PhysicsAsset->UpdateBodySetupIndexMap();
+  PhysicsAsset->UpdateBoundsBodiesArray();
 
-		bool MapValue = TableObjectElement->GetBoolField(TEXT("Value"));
-		TArray<TSharedPtr<FJsonValue>> Indices = TableObjectElement->GetObjectField(TEXT("Key"))->GetArrayField(TEXT("Indices"));
+  /* CollisionDisableTable
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  TArray<TSharedPtr<FJsonValue>> CollisionDisableTable =
+      GetAssetData()->GetArrayField(TEXT("CollisionDisableTable"));
 
-		const int32 BodyIndexA = Indices[0]->AsNumber();
-		const int32 BodyIndexB = Indices[1]->AsNumber();
+  for (const auto &TableJSONElement : CollisionDisableTable) {
+    if (!TableJSONElement.IsValid() ||
+        TableJSONElement->Type != EJson::Object ||
+        !TableJSONElement->AsObject().IsValid()) {
+      UE_LOG(LogJsonAsAsset, Warning,
+             TEXT("Skipping invalid CollisionDisableTable entry: expected "
+                  "object."));
+      continue;
+    }
 
-		/* Add to the CollisionDisableTable */
-		PhysicsAsset->CollisionDisableTable.Add(FRigidBodyIndexPair(BodyIndexA, BodyIndexB), MapValue);
-	}
+    const TSharedPtr<FJsonObject> TableObjectElement =
+        TableJSONElement->AsObject();
+    if (!TableObjectElement->HasField(TEXT("Key")) ||
+        !TableObjectElement->HasField(TEXT("Value"))) {
+      UE_LOG(LogJsonAsAsset, Warning,
+             TEXT("Skipping invalid CollisionDisableTable entry: missing Key "
+                  "or Value."));
+      continue;
+    }
 
-	/* ConstraintSetup ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	ProcessJsonArrayField(GetAssetData(), TEXT("ConstraintSetup"), [&](const TSharedPtr<FJsonObject>& ObjectField) {
-		const FName ExportName = GetExportNameOfSubobject(ObjectField->GetStringField(TEXT("ObjectName")));
-		const TSharedPtr<FJsonObject> ExportJson = ExportContainer->Find(ExportName)->JsonObject;
+    bool MapValue = TableObjectElement->GetBoolField(TEXT("Value"));
+    const TSharedPtr<FJsonObject> KeyObject =
+        TableObjectElement->GetObjectField(TEXT("Key"));
+    if (!KeyObject.IsValid() || !KeyObject->HasField(TEXT("Indices"))) {
+      UE_LOG(LogJsonAsAsset, Warning,
+             TEXT("Skipping invalid CollisionDisableTable entry: missing "
+                  "Indices array."));
+      continue;
+    }
 
-		const TSharedPtr<FJsonObject> ExportProperties = ExportJson->GetObjectField(TEXT("Properties"));
-		UPhysicsConstraintTemplate* PhysicsConstraintTemplate = CreateNewConstraint(PhysicsAsset, ExportName);
-		
-		GetObjectSerializer()->DeserializeObjectProperties(ExportProperties, PhysicsConstraintTemplate);
+    TArray<TSharedPtr<FJsonValue>> Indices =
+        KeyObject->GetArrayField(TEXT("Indices"));
+    if (!Indices.IsValidIndex(0) || !Indices.IsValidIndex(1)) {
+      UE_LOG(LogJsonAsAsset, Warning,
+             TEXT("Skipping invalid CollisionDisableTable entry with fewer "
+                  "than 2 indices."));
+      continue;
+    }
 
-		/* For caching. IMPORTANT! DO NOT REMOVE! */
-		PhysicsConstraintTemplate->UpdateProfileInstance();
-	});
+    const int32 BodyIndexA = Indices[0]->AsNumber();
+    const int32 BodyIndexB = Indices[1]->AsNumber();
 
-	/* Simple data at end ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	GetObjectSerializer()->DeserializeObjectProperties(RemovePropertiesShared(GetAssetData(),
-	{
-		"SkeletalBodySetups",
-		"ConstraintSetup",
-		"BoundsBodies",
-		"ThumbnailInfo",
-		"CollisionDisableTable"
-	}), PhysicsAsset);
+    /* Add to the CollisionDisableTable */
+    PhysicsAsset->CollisionDisableTable.Add(
+        FRigidBodyIndexPair(BodyIndexA, BodyIndexB), MapValue);
+  }
 
-	/* If the user selected a skeletal mesh in the browser, set it in the physics asset */
-	const USkeletalMesh* SkeletalMesh = GetSelectedAsset<USkeletalMesh>(true);
+  /* ConstraintSetup
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  ProcessJsonArrayField(
+      GetAssetData(), TEXT("ConstraintSetup"),
+      [&](const TSharedPtr<FJsonObject> &ObjectField) {
+        const FName ExportName = GetExportNameOfSubobject(
+            ObjectField->GetStringField(TEXT("ObjectName")));
+        FUObjectExport *FoundExport =
+            ExportContainer ? ExportContainer->Find(ExportName) : nullptr;
+        if (!FoundExport || !FoundExport->JsonObject.IsValid()) {
+          UE_LOG(LogJsonAsAsset, Warning,
+                 TEXT("Skipping missing ConstraintSetup export '%s'"),
+                 *ExportName.ToString());
+          return;
+        }
 
-	if (!SkeletalMesh) {
-		FString CleanName = GetAssetName();
-		CleanName.RemoveFromEnd(TEXT("_PhysicsAsset"));
-		CleanName.RemoveFromEnd(TEXT("_Physics"));
+        const TSharedPtr<FJsonObject> ExportJson = FoundExport->JsonObject;
 
-		const FString SearchPath = FPackageName::GetLongPackagePath(GetPackage()->GetName());
-		const FString Path1 = SearchPath / CleanName;
-		const FString Path2 = FString::Printf(TEXT("%s.%s"), *SearchPath, *CleanName);
+        const TSharedPtr<FJsonObject> ExportProperties =
+            ExportJson->GetObjectField(TEXT("Properties"));
+        UPhysicsConstraintTemplate *PhysicsConstraintTemplate =
+            CreateNewConstraint(PhysicsAsset, ExportName);
 
-		SkeletalMesh = Cast<USkeletalMesh>(StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, *Path1));
-		
-		if (!SkeletalMesh) {
-			SkeletalMesh = Cast<USkeletalMesh>(StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, *Path2));
-		}
-	}
-	
-	if (SkeletalMesh) {
-		PhysicsAsset->PreviewSkeletalMesh = SkeletalMesh;
-		PhysicsAsset->PostEditChange();
-	}
+        GetObjectSerializer()->DeserializeObjectProperties(
+            ExportProperties, PhysicsConstraintTemplate);
 
-	/* Finalize ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-	PhysicsAsset->Modify();
-	PhysicsAsset->MarkPackageDirty();
-	PhysicsAsset->UpdateBoundsBodiesArray();
-	
-	return OnAssetCreation(PhysicsAsset);
+        /* For caching. IMPORTANT! DO NOT REMOVE! */
+        PhysicsConstraintTemplate->UpdateProfileInstance();
+      });
+
+  /* Simple data at end
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  GetObjectSerializer()->DeserializeObjectProperties(
+      RemovePropertiesShared(GetAssetData(),
+                             {"SkeletalBodySetups", "ConstraintSetup",
+                              "BoundsBodies", "ThumbnailInfo",
+                              "CollisionDisableTable"}),
+      PhysicsAsset);
+
+  /* If the user selected a skeletal mesh in the browser, set it in the physics
+   * asset */
+  const USkeletalMesh *SkeletalMesh = GetSelectedAsset<USkeletalMesh>(true);
+
+  if (!SkeletalMesh) {
+    FString CleanName = GetAssetName();
+    CleanName.RemoveFromEnd(TEXT("_PhysicsAsset"));
+    CleanName.RemoveFromEnd(TEXT("_Physics"));
+
+    const FString SearchPath =
+        FPackageName::GetLongPackagePath(GetPackage()->GetName());
+    const FString Path1 = SearchPath / CleanName;
+    const FString Path2 =
+        FString::Printf(TEXT("%s.%s"), *SearchPath, *CleanName);
+
+    SkeletalMesh = Cast<USkeletalMesh>(
+        StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, *Path1));
+
+    if (!SkeletalMesh) {
+      SkeletalMesh = Cast<USkeletalMesh>(
+          StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, *Path2));
+    }
+  }
+
+  if (SkeletalMesh) {
+    PhysicsAsset->PreviewSkeletalMesh =
+        TSoftObjectPtr<USkeletalMesh>(FSoftObjectPath(SkeletalMesh));
+    PhysicsAsset->PostEditChange();
+  }
+
+  /* Finalize
+   * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   */
+  PhysicsAsset->Modify();
+  PhysicsAsset->MarkPackageDirty();
+  PhysicsAsset->UpdateBoundsBodiesArray();
+
+  return OnAssetCreation(PhysicsAsset);
 }
 
-USkeletalBodySetup* IPhysicsAssetImporter::CreateNewBody(UPhysicsAsset* PhysAsset, const FName ExportName, const FName BoneName) {
-	USkeletalBodySetup* NewBodySetup = NewObject<USkeletalBodySetup>(PhysAsset, ExportName, RF_Transactional);
-	NewBodySetup->BoneName = BoneName;
+USkeletalBodySetup *IPhysicsAssetImporter::CreateNewBody(
+    UPhysicsAsset *PhysAsset, const FName ExportName, const FName BoneName) {
+  USkeletalBodySetup *NewBodySetup =
+      NewObject<USkeletalBodySetup>(PhysAsset, ExportName, RF_Transactional);
+  NewBodySetup->BoneName = BoneName;
 
-	PhysAsset->SkeletalBodySetups.Add(NewBodySetup);
+  PhysAsset->SkeletalBodySetups.Add(NewBodySetup);
 
-	return NewBodySetup;
+  return NewBodySetup;
 }
 
-UPhysicsConstraintTemplate* IPhysicsAssetImporter::CreateNewConstraint(UPhysicsAsset* PhysAsset, const FName ExportName) {
-	UPhysicsConstraintTemplate* NewConstraintSetup = NewObject<UPhysicsConstraintTemplate>(PhysAsset, ExportName, RF_Transactional);
-	PhysAsset->ConstraintSetup.Add(NewConstraintSetup);
+UPhysicsConstraintTemplate *
+IPhysicsAssetImporter::CreateNewConstraint(UPhysicsAsset *PhysAsset,
+                                           const FName ExportName) {
+  UPhysicsConstraintTemplate *NewConstraintSetup =
+      NewObject<UPhysicsConstraintTemplate>(PhysAsset, ExportName,
+                                            RF_Transactional);
+  PhysAsset->ConstraintSetup.Add(NewConstraintSetup);
 
-	return NewConstraintSetup;
+  return NewConstraintSetup;
 }

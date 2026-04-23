@@ -51,7 +51,7 @@ public:
     TArray<TObjectPtr<T>> LoadExport(const TArray<TSharedPtr<FJsonValue>>& PackageArray, TArray<TObjectPtr<T>> Array);
 
 public:
-    void Save() const;
+    void Save(const UObject* Asset = nullptr) const;
 
     /*
      * Handle edit changes, and add it to the content browser
