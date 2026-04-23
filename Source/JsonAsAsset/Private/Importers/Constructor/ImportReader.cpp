@@ -41,11 +41,33 @@ IImporter* IImportReader::ReadExportAndImport(FUObjectExportContainer* Container
 
 	const UClass* Class = FindClassByType(Type);
 	
-	if (Class == nullptr) return nullptr;
+	if (Class == nullptr) {
+		UE_LOG(
+			LogJsonAsAsset,
+			Warning,
+			TEXT("Skipping '%s' from '%s': unresolved Unreal class for type '%s'."),
+			*Name,
+			*File,
+			*Type
+		);
+		return nullptr;
+	}
 
 	/* Check if this export can be imported */
 	const bool InheritsDataAsset = Class->IsChildOf(UDataAsset::StaticClass());
-	if (!CanImport(Type, false, Class)) return nullptr;
+	FString ImportSkipReason;
+	if (!CanImport(Type, false, Class, &ImportSkipReason)) {
+		UE_LOG(
+			LogJsonAsAsset,
+			Warning,
+			TEXT("Skipping '%s' (%s) from '%s': %s"),
+			*Name,
+			*Type,
+			*File,
+			ImportSkipReason.IsEmpty() ? TEXT("Type is not importable in the current configuration.") : *ImportSkipReason
+		);
+		return nullptr;
+	}
 
 	/* Convert from relative path to full path */
 	if (FPaths::IsRelative(File)) File = FPaths::ConvertRelativePathToFull(File);

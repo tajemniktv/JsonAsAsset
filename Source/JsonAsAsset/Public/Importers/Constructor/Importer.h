@@ -72,15 +72,46 @@ protected:
 template <class T>
 TObjectPtr<T> IImporter::DownloadWrapper(TObjectPtr<T> InObject, FString Type, const FString Name, const FString Path) {
     const UJsonAsAssetSettings* Settings = GetSettings();
+    if (Settings == nullptr) {
+        UE_LOG(
+            LogJsonAsAsset,
+            Warning,
+            TEXT("[Cloud] Skip '%s' (%s): settings are unavailable."),
+            *Name,
+            *Type
+        );
+        return InObject;
+    }
 
     if (Type == "Texture") Type = "Texture2D";
-    
-    if (Settings->EnableCloudServer && (
+
+    const bool bShouldTryCloud = Settings->EnableCloudServer && (
         InObject == nullptr ||
             (Settings->AssetSettings.Texture.UpdateExisingTextures && Type == "Texture2D")
         )
-        && !Path.StartsWith("Engine/") && !Path.StartsWith("/Engine/")
-    ) {
+        && !Path.StartsWith("Engine/") && !Path.StartsWith("/Engine/");
+
+    if (!bShouldTryCloud) {
+        UE_LOG(
+            LogJsonAsAsset,
+            Verbose,
+            TEXT("[Cloud] Skip '%s' (%s): cloud disabled or existing reference retained."),
+            *Name,
+            *Type
+        );
+        return InObject;
+    }
+
+    UE_LOG(
+        LogJsonAsAsset,
+        Log,
+        TEXT("[Cloud] Resolve '%s' (%s) from '%s'."),
+        *Name,
+        *Type,
+        *Path
+    );
+
+    if (bShouldTryCloud) {
         const UObject* DefaultObject = GetClassDefaultObject(T::StaticClass());
 
         if (DefaultObject != nullptr && !Name.IsEmpty() && !Path.IsEmpty()) {
@@ -95,6 +126,13 @@ TObjectPtr<T> IImporter::DownloadWrapper(TObjectPtr<T> InObject, FString Type, c
                 const FSlateBrush* IconBrush = FSlateIconFinder::FindCustomIconBrushForClass(FindObject<UClass>(nullptr, *("/Script/Engine." + Type)), TEXT("ClassThumbnail"));
 
                 if (DownloadStatus) {
+                    UE_LOG(
+                        LogJsonAsAsset,
+                        Log,
+                        TEXT("[Cloud] Imported '%s' (%s)."),
+                        *Name,
+                        *Type
+                    );
                     AppendNotification(
                         AssetNameText,
                         FText::FromString(Type),
@@ -105,6 +143,13 @@ TObjectPtr<T> IImporter::DownloadWrapper(TObjectPtr<T> InObject, FString Type, c
                         310.0f
                     );
                 } else {
+                    UE_LOG(
+                        LogJsonAsAsset,
+                        Warning,
+                        TEXT("[Cloud] Request completed but import failed for '%s' (%s)."),
+                        *Name,
+                        *Type
+                    );
                     AppendNotification(
                         AssetNameText,
                         FText::FromString(Type),
@@ -115,7 +160,25 @@ TObjectPtr<T> IImporter::DownloadWrapper(TObjectPtr<T> InObject, FString Type, c
                         310.0f
                     );
                 }
+            } else {
+                UE_LOG(
+                    LogJsonAsAsset,
+                    Warning,
+                    TEXT("[Cloud] Resolve failed for '%s' (%s) from '%s'."),
+                    *Name,
+                    *Type,
+                    *NewPath
+                );
             }
+        } else {
+            UE_LOG(
+                LogJsonAsAsset,
+                Warning,
+                TEXT("[Cloud] Skip resolve due to invalid request data. Name='%s' Path='%s' Type='%s'."),
+                *Name,
+                *Path,
+                *Type
+            );
         }
     }
 

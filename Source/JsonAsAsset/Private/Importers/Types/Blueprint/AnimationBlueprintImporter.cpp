@@ -26,8 +26,12 @@
 bool GShowAnimationBlueprintImporterWarning = true;
 
 bool IAnimationBlueprintImporter::Import() {
-	if (GShowAnimationBlueprintImporterWarning) {
-		SpawnPrompt("Preface Warning", "None of this is final, this is completely a work in progress with flaws. None of it is perfect. If you find a issue, fix it.\n\nTo remove this warning, go to AnimationBlueprintImporter.cpp and set GShowAnimationBlueprintImporterWarning to false.");
+	const UJsonAsAssetSettings* Settings = GetSettings();
+	const bool bShowExperimentalWarning =
+		Settings != nullptr && Settings->ShowAnimationBlueprintExperimentalWarning;
+
+	if (GShowAnimationBlueprintImporterWarning && bShowExperimentalWarning) {
+		SpawnPrompt("Preface Warning", "Animation blueprint import is experimental and may not be stable for all assets.");
 		GShowAnimationBlueprintImporterWarning = false;
 	}
 	

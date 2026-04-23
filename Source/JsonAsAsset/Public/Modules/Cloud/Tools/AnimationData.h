@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Animation/AnimMontage.h"
+#include "Engine/EngineUtilities.h"
 #include "Importers/Constructor/Importer.h"
 #include "Modules/Toolbar/Tools/ToolBase.h"
 #include "Utilities/JsonUtilities.h"
@@ -28,7 +29,10 @@ inline bool ReadAnimationData(USerializerContainer* Container, const bool UseSel
 	if (UseSelectedAsset) {
 		if (!AnimSequenceBase) {
 			UE_LOG(LogJsonAsAsset, Error, TEXT("Could not get valid AnimSequenceBase"));
-			FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Select a Animation inside of the Content Browser to import data."));
+			const UJsonAsAssetSettings* Settings = GetSettings();
+			if (Settings != nullptr && Settings->ShowAnimationSelectionWarning) {
+				FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Select a Animation inside of the Content Browser to import data."));
+			}
 		
 			return false;
 		}

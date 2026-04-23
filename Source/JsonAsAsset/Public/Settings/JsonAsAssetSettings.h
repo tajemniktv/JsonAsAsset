@@ -81,4 +81,12 @@ public:
 	/* Enables experimental/developing features of JsonAsAsset. Features may not work as intended. */
 	UPROPERTY(EditAnywhere, Config, Category = Settings, AdvancedDisplay)
 	bool EnableExperiments = false;
+
+	/* Show a popup when animation data import cannot find a selected animation asset. */
+	UPROPERTY(EditAnywhere, Config, Category = Settings, AdvancedDisplay)
+	bool ShowAnimationSelectionWarning = false;
+
+	/* Show the one-time experimental warning popup when importing animation blueprints. */
+	UPROPERTY(EditAnywhere, Config, Category = Settings, AdvancedDisplay)
+	bool ShowAnimationBlueprintExperimentalWarning = false;
 };
