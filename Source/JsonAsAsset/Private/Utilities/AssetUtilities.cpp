@@ -19,19 +19,38 @@
 #include "Importers/Constructor/ImportReader.h"
 #include "Importers/Constructor/Graph/SoundGraph.h"
 #include "Interfaces/IHttpResponse.h"
+#include "Misc/PackageName.h"
 #include "Modules/Cloud/Cloud.h"
 #include "Settings/Runtime.h"
 #include "Utilities/RemoteUtilities.h"
 
 /* CreateAssetPackage Implementations ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 UPackage* FAssetUtilities::CreateAssetPackage(const FString& Path) {
+	if (Path.IsEmpty() || Path == TEXT("None")) {
+		UE_LOG(LogJsonAsAsset, Error,
+		       TEXT("CreateAssetPackage failed: empty package path."));
+		return nullptr;
+	}
+
+	FString NormalizedPath = Path;
+	NormalizedPath.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+	FText ValidationError;
+	if (!FPackageName::IsValidLongPackageName(
+	        NormalizedPath, true, &ValidationError)) {
+		UE_LOG(
+		    LogJsonAsAsset, Error,
+		    TEXT("CreateAssetPackage failed: invalid package path '%s' (%s)."),
+		    *NormalizedPath, *ValidationError.ToString());
+		return nullptr;
+	}
+
 	UPackage* Package = CreatePackage(
 		/* 4.25, 4.26.0 and below need an Outer */
 #if UE4_25_BELOW || (UE4_26_0)
 		nullptr, 
 #endif
-		*Path);
-	Package->FullyLoad();
+		*NormalizedPath);
 
 	return Package;
 }
@@ -127,8 +146,23 @@ UPackage* FAssetUtilities::CreateAssetPackage(const FString& Name, const FString
 		return nullptr;
 	}
 	
-	UPackage* Package = CreateAssetPackage(*PathWithGame);
-	Package->FullyLoad();
+	FText ValidationError;
+	if (!FPackageName::IsValidLongPackageName(
+	        PathWithGame, true, &ValidationError)) {
+		FailureReason = FString::Printf(
+		    TEXT("Invalid package path '%s' (%s)."), *PathWithGame,
+		    *ValidationError.ToString());
+		return nullptr;
+	}
+
+	UPackage* Package = CreateAssetPackage(PathWithGame);
+	if (Package == nullptr) {
+		if (FailureReason.IsEmpty()) {
+			FailureReason = FString::Printf(
+			    TEXT("Failed to create package '%s'."), *PathWithGame);
+		}
+		return nullptr;
+	}
 
 	return Package;
 }
