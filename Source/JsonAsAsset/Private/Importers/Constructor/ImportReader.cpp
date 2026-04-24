@@ -199,7 +199,29 @@ IImporter* IImportReader::ImportReference(const FString& File) {
 	}
 	
 	TArray<TSharedPtr<FJsonValue>> DataObjects; {
-		DeserializeJSON(FilePath, DataObjects);
+		FString Content;
+		if (!FFileHelper::LoadFileToString(Content, *FilePath)) {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("Skipping '%s': unable to read JSON file."), *FilePath);
+			return nullptr;
+		}
+
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Content);
+		TSharedPtr<FJsonValue> RootValue;
+		if (!FJsonSerializer::Deserialize(Reader, RootValue) || !RootValue.IsValid()) {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("Skipping '%s': invalid JSON."), *FilePath);
+			return nullptr;
+		}
+
+		if (RootValue->Type == EJson::Array) {
+			DataObjects = RootValue->AsArray();
+		}
+		else if (RootValue->Type == EJson::Object && RootValue->AsObject().IsValid() && RootValue->AsObject()->HasField(TEXT("Type"))) {
+			DataObjects.Add(RootValue);
+		}
+		else {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("Skipping '%s': unsupported JSON root for import."), *FilePath);
+			return nullptr;
+		}
 	}
 
 	IImporter* Importer = nullptr;

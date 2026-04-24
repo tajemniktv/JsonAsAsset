@@ -4,6 +4,7 @@
 
 #include "Importers/Constructor/Importer.h"
 #include "Importers/Constructor/ImportReader.h"
+#include "Importers/Types/Materials/MaterialApproximation.h"
 
 #if ENGINE_UE4
 #include "Modules/Toolbar/Dropdowns/CloudToolsDropdownBuilder.h"
@@ -69,6 +70,16 @@ void IToolsDropdownBuilder::Build(FMenuBuilder& MenuBuilder) const {
 									true,
 									false
 								);
+
+								FScopedMaterialApproximationImportSession ApproximationSession(JsonFiles);
+								JsonFiles.Sort([](const FString& A, const FString& B) {
+									const int32 RankA = FMaterialApproximation::GetImportRankForFile(A);
+									const int32 RankB = FMaterialApproximation::GetImportRankForFile(B);
+									if (RankA != RankB) {
+										return RankA < RankB;
+									}
+									return A < B;
+								});
 
 								for (FString& JsonPath : JsonFiles) {
 									IImportReader::ImportReference(JsonPath);

@@ -1,6 +1,7 @@
 /* Copyright JsonAsAsset Contributors 2024-2026 */
 
 #include "Importers/Types/Materials/MaterialImporter.h"
+#include "Importers/Types/Materials/MaterialApproximation.h"
 #include "Importers/Types/Materials/MaterialStubs.h"
 
 /* Include Material.h (depends on UE Version) */
@@ -53,11 +54,21 @@ bool IMaterialImporter::Import() {
 	/* If Missing Material Data */
 	if (ExpressionContainer->Num() == 0) {
 #if ENGINE_UE5
-		if (GetSettings()->AssetSettings.Material.Stubs) {
+		const EMaterialFallbackMode FallbackMode = Settings->AssetSettings.Material.FallbackMode;
+		const bool bAllowApproximation =
+			FallbackMode == EMaterialFallbackMode::Approximation ||
+			FallbackMode == EMaterialFallbackMode::ApproximationThenLegacyStubs;
+		const bool bAllowLegacyStubs =
+			Settings->AssetSettings.Material.Stubs ||
+			FallbackMode == EMaterialFallbackMode::LegacyStubs ||
+			FallbackMode == EMaterialFallbackMode::ApproximationThenLegacyStubs;
+
+		const bool bCreatedApproximation = bAllowApproximation && FMaterialApproximation::TryApproximateMaterial(this, Props);
+		if (!bCreatedApproximation && bAllowLegacyStubs) {
 			CreateStubs(this);
 			CreatedStubsNotification();
 		}
-		else {
+		else if (!bCreatedApproximation) {
 #endif
 			SpawnMaterialDataMissingNotification();
 #if ENGINE_UE5
