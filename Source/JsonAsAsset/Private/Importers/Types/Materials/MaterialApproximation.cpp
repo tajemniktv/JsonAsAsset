@@ -1043,9 +1043,6 @@ const FApproxTextureParam* FindFallbackBaseColorTexture(const FApproxMaterialMod
 
 		Candidate = &Texture;
 		CandidateCount++;
-		if (CandidateCount > 1) {
-			return nullptr;
-		}
 	}
 
 	if (CandidateCount == 1) {
