@@ -1048,7 +1048,64 @@ const FApproxTextureParam* FindFallbackBaseColorTexture(const FApproxMaterialMod
 		}
 	}
 
-	return CandidateCount == 1 ? Candidate : nullptr;
+	if (CandidateCount == 1) {
+		return Candidate;
+	}
+
+	auto ScoreBaseColorFallback = [](const FApproxTextureParam& Texture) -> int32
+	{
+		const FString Name = NormalizeNameForRole(Texture.ParameterName.ToString() + TEXT(" ") + Texture.TextureName);
+
+		int32 Score = 0;
+		if (Texture.Role == EApproxTextureRole::BaseColor) {
+			Score += 100;
+		}
+		else if (Texture.Role == EApproxTextureRole::Unknown) {
+			Score += 15;
+		}
+
+		if (HasAny(Name, { TEXT("basecolor"), TEXT("basecolour"), TEXT("albedo"), TEXT("diffuse"), TEXT("color"), TEXT("colour") })) {
+			Score += 60;
+		}
+
+		if (HasAny(Name, { TEXT("normal"), TEXT("orm"), TEXT("arm"), TEXT("aorm"), TEXT("rough"), TEXT("metal"), TEXT("occlusion"), TEXT("ao"),
+			TEXT("emissive"), TEXT("glow"), TEXT("opacity"), TEXT("alpha"), TEXT("mask") })) {
+			Score -= 80;
+		}
+
+		if (HasAny(Name, { TEXT("black"), TEXT("null"), TEXT("dummy"), TEXT("placeholder") })) {
+			Score -= 25;
+		}
+
+		return Score;
+	};
+
+	const FApproxTextureParam* Best = nullptr;
+	int32 BestScore = MIN_int32;
+	for (const FApproxTextureParam& Texture : Model.Textures) {
+		const bool bHardExcluded =
+			Texture.Role == EApproxTextureRole::Normal ||
+			Texture.Role == EApproxTextureRole::ORM ||
+			Texture.Role == EApproxTextureRole::Emissive ||
+			Texture.Role == EApproxTextureRole::EmissiveBlinkers ||
+			Texture.Role == EApproxTextureRole::Opacity ||
+			Texture.Role == EApproxTextureRole::OpacityMask ||
+			Texture.Role == EApproxTextureRole::Roughness ||
+			Texture.Role == EApproxTextureRole::Metallic ||
+			Texture.Role == EApproxTextureRole::AmbientOcclusion;
+
+		if (bHardExcluded) {
+			continue;
+		}
+
+		const int32 Score = ScoreBaseColorFallback(Texture);
+		if (Score > BestScore) {
+			BestScore = Score;
+			Best = &Texture;
+		}
+	}
+
+	return BestScore > 0 ? Best : nullptr;
 }
 
 bool HasGraphInputs(const FApproxMaterialModel& Model)
