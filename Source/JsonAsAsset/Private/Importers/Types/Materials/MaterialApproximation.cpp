@@ -854,19 +854,38 @@ UTexture* ResolveTextureForApproximation(const FApproxTextureParam& Param, const
 	return nullptr;
 }
 
+EMaterialSamplerType GetSamplerTypeForApproxRole(const EApproxTextureRole Role)
+{
+	switch (Role) {
+		case EApproxTextureRole::Normal:
+			return SAMPLERTYPE_Normal;
+		case EApproxTextureRole::ORM:
+		case EApproxTextureRole::Roughness:
+		case EApproxTextureRole::Metallic:
+		case EApproxTextureRole::AmbientOcclusion:
+		case EApproxTextureRole::Opacity:
+		case EApproxTextureRole::OpacityMask:
+			return SAMPLERTYPE_Masks;
+		case EApproxTextureRole::BaseColor:
+		case EApproxTextureRole::Emissive:
+		case EApproxTextureRole::EmissiveBlinkers:
+		case EApproxTextureRole::Unknown:
+		default:
+			return SAMPLERTYPE_Color;
+	}
+}
+
 UMaterialExpressionTextureSampleParameter2D* CreateTextureParameter(UMaterial* Material, const FApproxTextureParam& Param, const int32 X, const int32 Y)
 {
 	UMaterialExpressionTextureSampleParameter2D* TextureParam = NewExpression<UMaterialExpressionTextureSampleParameter2D>(Material, X, Y);
 	TextureParam->ParameterName = Param.ParameterName;
+	TextureParam->SamplerType = GetSamplerTypeForApproxRole(Param.Role);
 
 	const FString NormalizedPath = FMaterialApproximation::NormalizeObjectPath(Param.TextureObjectPath);
 	const bool bHasAnyTextureHint = !NormalizedPath.IsEmpty() || !Param.TextureName.IsEmpty() || !Param.ParameterName.IsNone();
 	if (bHasAnyTextureHint) {
 		UTexture* Texture = ResolveTextureForApproximation(Param, NormalizedPath);
 		TextureParam->Texture = Texture;
-		if (Texture) {
-			TextureParam->SamplerType = TextureParam->GetSamplerTypeForTexture(Texture);
-		}
 	}
 
 	if (UMaterialExpressionTextureCoordinate* Coord = CreateTextureCoordinate(Material, Param, X - 240, Y + 40)) {
