@@ -2,6 +2,7 @@
 
 #include "Importers/Types/Materials/MaterialApproximation.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/Texture.h"
 #include "Importers/Types/Materials/MaterialImporter.h"
 #include "Materials/MaterialExpressionAdd.h"
@@ -14,8 +15,11 @@
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
+#include "Modules/ModuleManager.h"
 #include "Modules/Log.h"
 #include "Settings/JsonAsAssetSettings.h"
+#include "UObject/UObjectIterator.h"
 #include "Utilities/JsonUtilities.h"
 
 namespace {
@@ -600,18 +604,265 @@ UMaterialExpressionTextureCoordinate* CreateTextureCoordinate(UMaterial* Materia
 	return Coord;
 }
 
+FString JoinPathCandidates(const TArray<FString>& Candidates)
+{
+	FString Result;
+	for (const FString& Candidate : Candidates) {
+		if (!Result.IsEmpty()) {
+			Result += TEXT(", ");
+		}
+		Result += Candidate;
+	}
+	return Result;
+}
+
+FString StripClassWrapperFromPath(const FString& InPath)
+{
+	FString OutPath = InPath.TrimStartAndEnd();
+	const int32 FirstQuote = OutPath.Find(TEXT("'"));
+	const int32 LastQuote = OutPath.Find(TEXT("'"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+	if (FirstQuote != INDEX_NONE && LastQuote != INDEX_NONE && LastQuote > FirstQuote) {
+		OutPath = OutPath.Mid(FirstQuote + 1, LastQuote - FirstQuote - 1);
+	}
+	return OutPath;
+}
+
+FString EnsureGamePath(const FString& InPath)
+{
+	FString OutPath = StripClassWrapperFromPath(InPath).Replace(TEXT("\\"), TEXT("/"));
+	if (OutPath.IsEmpty() || OutPath == TEXT("None")) {
+		return FString();
+	}
+
+	if (OutPath.Contains(TEXT("/Content/"))) {
+		FString Right;
+		OutPath.Split(TEXT("/Content/"), nullptr, &Right, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		OutPath = TEXT("/Game/") + Right;
+	}
+
+	if (!OutPath.StartsWith(TEXT("/"))) {
+		OutPath = TEXT("/") + OutPath;
+	}
+
+	return OutPath;
+}
+
+FString StripFModelNumericSuffix(const FString& InPath)
+{
+	FString Path = InPath;
+	FString Left;
+	FString Right;
+	if (Path.Split(TEXT("."), &Left, &Right, ESearchCase::IgnoreCase, ESearchDir::FromEnd)) {
+		int32 Index = INDEX_NONE;
+		if (LexTryParseString(Index, *Right)) {
+			FString AssetName;
+			Left.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+			if (!AssetName.IsEmpty()) {
+				return Left + TEXT(".") + AssetName;
+			}
+			return Left;
+		}
+	}
+	return Path;
+}
+
+void AddTexturePathCandidate(TArray<FString>& Candidates, const FString& Candidate)
+{
+	if (Candidate.IsEmpty()) {
+		return;
+	}
+
+	Candidates.AddUnique(Candidate);
+}
+
+void AddObjectPathForms(TArray<FString>& Candidates, const FString& ObjectPath)
+{
+	if (ObjectPath.IsEmpty()) {
+		return;
+	}
+
+	AddTexturePathCandidate(Candidates, ObjectPath);
+	AddTexturePathCandidate(Candidates, StripFModelNumericSuffix(ObjectPath));
+
+	FString PackagePath;
+	FString ObjectName;
+	if (ObjectPath.Split(TEXT("."), &PackagePath, &ObjectName, ESearchCase::IgnoreCase, ESearchDir::FromEnd)) {
+		if (!PackagePath.IsEmpty()) {
+			FString PackageAssetName;
+			PackagePath.Split(TEXT("/"), nullptr, &PackageAssetName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+
+			AddTexturePathCandidate(Candidates, PackagePath + TEXT(".") + ObjectName);
+			if (!PackageAssetName.IsEmpty()) {
+				AddTexturePathCandidate(Candidates, PackagePath + TEXT(".") + PackageAssetName);
+			}
+			AddTexturePathCandidate(Candidates, PackagePath);
+		}
+	}
+	else {
+		FString PackageAssetName;
+		ObjectPath.Split(TEXT("/"), nullptr, &PackageAssetName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		AddTexturePathCandidate(Candidates, ObjectPath);
+		if (!PackageAssetName.IsEmpty()) {
+			AddTexturePathCandidate(Candidates, ObjectPath + TEXT(".") + PackageAssetName);
+		}
+	}
+}
+
+void AddTextureWrapperForms(TArray<FString>& OutCandidates, const TArray<FString>& SourceCandidates)
+{
+	for (const FString& Candidate : SourceCandidates) {
+		AddTexturePathCandidate(OutCandidates, Candidate);
+		AddTexturePathCandidate(OutCandidates, TEXT("Texture2D'") + Candidate + TEXT("'"));
+	}
+}
+
+void AddNameFallbackCandidates(TArray<FString>& Candidates, const FApproxTextureParam& Param, const FString& NormalizedPath)
+{
+	TArray<FString> Names;
+	if (!Param.TextureName.IsEmpty()) {
+		Names.AddUnique(Param.TextureName);
+	}
+	if (!Param.ParameterName.IsNone()) {
+		Names.AddUnique(Param.ParameterName.ToString());
+	}
+
+	if (!NormalizedPath.IsEmpty()) {
+		const FString PathName = FPackageName::ObjectPathToObjectName(NormalizedPath);
+		if (!PathName.IsEmpty()) {
+			Names.AddUnique(PathName);
+		}
+	}
+
+	for (FString Name : Names) {
+		Name = Name.TrimStartAndEnd();
+		if (Name.IsEmpty()) {
+			continue;
+		}
+
+		FString Trimmed = Name;
+		if (Trimmed.Contains(TEXT("."))) {
+			Trimmed.Split(TEXT("."), nullptr, &Trimmed, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		}
+		if (Trimmed.Contains(TEXT("/"))) {
+			Trimmed.Split(TEXT("/"), nullptr, &Trimmed, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		}
+
+		AddTexturePathCandidate(Candidates, Trimmed);
+		AddTexturePathCandidate(Candidates, TEXT("/Game/") + Trimmed + TEXT(".") + Trimmed);
+	}
+}
+
+TArray<FString> BuildTextureLoadCandidates(const FApproxTextureParam& Param, const FString& NormalizedPath)
+{
+	TArray<FString> RawCandidates;
+
+	const FString RawGamePath = EnsureGamePath(Param.TextureObjectPath);
+	const FString RawNormalized = FMaterialApproximation::NormalizeObjectPath(RawGamePath);
+	const FString Normalized = FMaterialApproximation::NormalizeObjectPath(NormalizedPath);
+
+	AddObjectPathForms(RawCandidates, RawNormalized);
+	AddObjectPathForms(RawCandidates, Normalized);
+	AddNameFallbackCandidates(RawCandidates, Param, Normalized);
+
+	TArray<FString> WrappedCandidates;
+	AddTextureWrapperForms(WrappedCandidates, RawCandidates);
+	return WrappedCandidates;
+}
+
+UTexture* ResolveTextureByObjectName(const FString& ObjectName)
+{
+	if (ObjectName.IsEmpty()) {
+		return nullptr;
+	}
+
+	const FName TargetName(*ObjectName);
+	for (TObjectIterator<UTexture> It; It; ++It) {
+		if (It->GetFName() == TargetName) {
+			return *It;
+		}
+	}
+
+#if WITH_EDITOR
+	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")) || FModuleManager::Get().LoadModule(TEXT("AssetRegistry")) != nullptr) {
+		FAssetRegistryModule& RegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		FARFilter Filter;
+		Filter.PackagePaths.Add(FName(TEXT("/Game")));
+		Filter.bRecursivePaths = true;
+		Filter.ClassPaths.Add(UTexture::StaticClass()->GetClassPathName());
+		Filter.bRecursiveClasses = true;
+
+		TArray<FAssetData> Assets;
+		RegistryModule.Get().GetAssets(Filter, Assets);
+		for (const FAssetData& AssetData : Assets) {
+			if (AssetData.AssetName == TargetName) {
+				if (UTexture* Texture = Cast<UTexture>(AssetData.GetAsset())) {
+					return Texture;
+				}
+			}
+		}
+	}
+#endif
+
+	return nullptr;
+}
+
+UTexture* ResolveTextureForApproximation(const FApproxTextureParam& Param, const FString& NormalizedPath)
+{
+	const TArray<FString> Candidates = BuildTextureLoadCandidates(Param, NormalizedPath);
+	UE_LOG(LogJsonAsAsset, Verbose, TEXT("[MaterialApproximation] Resolving texture param='%s' raw='%s' normalized='%s' candidates=[%s]"),
+		*Param.ParameterName.ToString(), *Param.TextureObjectPath, *NormalizedPath, *JoinPathCandidates(Candidates));
+
+	for (const FString& Candidate : Candidates) {
+		UObject* LoadedObject = FindObject<UTexture>(nullptr, *Candidate);
+		if (!LoadedObject) {
+			LoadedObject = StaticLoadObject(UTexture::StaticClass(), nullptr, *Candidate);
+		}
+		if (UTexture* LoadedTexture = Cast<UTexture>(LoadedObject)) {
+			UE_LOG(LogJsonAsAsset, Verbose, TEXT("[MaterialApproximation] Resolved texture param='%s' with candidate='%s'"),
+				*Param.ParameterName.ToString(), *Candidate);
+			return LoadedTexture;
+		}
+		UE_LOG(LogJsonAsAsset, Verbose, TEXT("[MaterialApproximation] Candidate failed param='%s' candidate='%s'"),
+			*Param.ParameterName.ToString(), *Candidate);
+	}
+
+	TArray<FString> NameCandidates;
+	if (!Param.TextureName.IsEmpty()) {
+		NameCandidates.AddUnique(Param.TextureName);
+	}
+	if (!Param.ParameterName.IsNone()) {
+		NameCandidates.AddUnique(Param.ParameterName.ToString());
+	}
+	if (!NormalizedPath.IsEmpty()) {
+		const FString ObjectName = FPackageName::ObjectPathToObjectName(NormalizedPath);
+		if (!ObjectName.IsEmpty()) {
+			NameCandidates.AddUnique(ObjectName);
+		}
+	}
+
+	for (const FString& NameCandidate : NameCandidates) {
+		UTexture* NameResolved = ResolveTextureByObjectName(NameCandidate);
+		if (NameResolved) {
+			UE_LOG(LogJsonAsAsset, Verbose, TEXT("[MaterialApproximation] Resolved texture param='%s' by object name fallback='%s' path='%s'"),
+				*Param.ParameterName.ToString(), *NameCandidate, *NameResolved->GetPathName());
+			return NameResolved;
+		}
+	}
+
+	UE_LOG(LogJsonAsAsset, Warning, TEXT("[MaterialApproximation] Failed to resolve texture param='%s' raw='%s' normalized='%s' candidates=[%s]"),
+		*Param.ParameterName.ToString(), *Param.TextureObjectPath, *NormalizedPath, *JoinPathCandidates(Candidates));
+	return nullptr;
+}
+
 UMaterialExpressionTextureSampleParameter2D* CreateTextureParameter(UMaterial* Material, const FApproxTextureParam& Param, const int32 X, const int32 Y)
 {
 	UMaterialExpressionTextureSampleParameter2D* TextureParam = NewExpression<UMaterialExpressionTextureSampleParameter2D>(Material, X, Y);
 	TextureParam->ParameterName = Param.ParameterName;
 
 	const FString NormalizedPath = FMaterialApproximation::NormalizeObjectPath(Param.TextureObjectPath);
-	if (!NormalizedPath.IsEmpty()) {
-		UTexture* Texture = Cast<UTexture>(StaticLoadObject(UTexture::StaticClass(), nullptr, *NormalizedPath));
-		if (!Texture) {
-			UE_LOG(LogJsonAsAsset, Warning, TEXT("[MaterialApproximation] Texture '%s' for parameter '%s' could not be loaded."),
-				*NormalizedPath, *Param.ParameterName.ToString());
-		}
+	const bool bHasAnyTextureHint = !NormalizedPath.IsEmpty() || !Param.TextureName.IsEmpty() || !Param.ParameterName.IsNone();
+	if (bHasAnyTextureHint) {
+		UTexture* Texture = ResolveTextureForApproximation(Param, NormalizedPath);
 		TextureParam->Texture = Texture;
 		if (Texture) {
 			TextureParam->SamplerType = TextureParam->GetSamplerTypeForTexture(Texture);
@@ -772,6 +1023,34 @@ const FApproxVectorParam* FindVector(const FApproxMaterialModel& Model, const TA
 	return nullptr;
 }
 
+const FApproxTextureParam* FindFallbackBaseColorTexture(const FApproxMaterialModel& Model)
+{
+	const FApproxTextureParam* Candidate = nullptr;
+	int32 CandidateCount = 0;
+
+	for (const FApproxTextureParam& Texture : Model.Textures) {
+		const bool bExcluded =
+			Texture.Role == EApproxTextureRole::Normal ||
+			Texture.Role == EApproxTextureRole::ORM ||
+			Texture.Role == EApproxTextureRole::Emissive ||
+			Texture.Role == EApproxTextureRole::EmissiveBlinkers ||
+			Texture.Role == EApproxTextureRole::Opacity ||
+			Texture.Role == EApproxTextureRole::OpacityMask;
+
+		if (bExcluded) {
+			continue;
+		}
+
+		Candidate = &Texture;
+		CandidateCount++;
+		if (CandidateCount > 1) {
+			return nullptr;
+		}
+	}
+
+	return CandidateCount == 1 ? Candidate : nullptr;
+}
+
 bool HasGraphInputs(const FApproxMaterialModel& Model)
 {
 	return Model.Textures.Num() > 0 || Model.Scalars.Num() > 0 || Model.Vectors.Num() > 0 || Model.StaticSwitches.Num() > 0;
@@ -784,6 +1063,13 @@ bool GenerateGraph(UMaterial* Material, const FApproxMaterialModel& Model)
 	}
 
 	const UJsonAsAssetSettings* Settings = GetSettings();
+	const bool bCreateUnknownNodes = Settings && Settings->AssetSettings.Material.CreateUnconnectedUnknownParameterNodes;
+	const int32 MaxUnknownTextureNodes = 48;
+	const int32 MaxUnknownScalarNodes = 48;
+	const int32 MaxUnknownVectorNodes = 48;
+	int32 UnknownTextureCount = 0;
+	int32 UnknownScalarCount = 0;
+	int32 UnknownVectorCount = 0;
 	ApplyMaterialProperties(Material, Model);
 
 	TMap<FName, UMaterialExpressionTextureSampleParameter2D*> TextureNodes;
@@ -792,23 +1078,56 @@ bool GenerateGraph(UMaterial* Material, const FApproxMaterialModel& Model)
 
 	int32 Y = -480;
 	for (const FApproxTextureParam& Texture : Model.Textures) {
+		if (Texture.Role == EApproxTextureRole::Unknown) {
+			UnknownTextureCount++;
+		}
+		if (Texture.Role == EApproxTextureRole::Unknown && (!bCreateUnknownNodes || UnknownTextureCount > MaxUnknownTextureNodes)) {
+			continue;
+		}
 		TextureNodes.Add(Texture.ParameterName, CreateTextureParameter(Material, Texture, -960, Y));
 		Y += 220;
 	}
 
 	Y = -480;
 	for (const FApproxVectorParam& Vector : Model.Vectors) {
+		if (Vector.Role == EApproxVectorRole::Unknown) {
+			UnknownVectorCount++;
+		}
+		if (Vector.Role == EApproxVectorRole::Unknown && (!bCreateUnknownNodes || UnknownVectorCount > MaxUnknownVectorNodes)) {
+			continue;
+		}
 		VectorNodes.Add(Vector.ParameterName, CreateVectorParameter(Material, Vector, -960, Y));
 		Y += 160;
 	}
 
 	Y = -480;
 	for (const FApproxScalarParam& Scalar : Model.Scalars) {
+		if (Scalar.Role == EApproxScalarRole::Unknown) {
+			UnknownScalarCount++;
+		}
+		if (Scalar.Role == EApproxScalarRole::Unknown && (!bCreateUnknownNodes || UnknownScalarCount > MaxUnknownScalarNodes)) {
+			continue;
+		}
 		ScalarNodes.Add(Scalar.ParameterName, CreateScalarParameter(Material, Scalar, -720, Y));
 		Y += 120;
 	}
 
-	if (Settings && Settings->AssetSettings.Material.CreateUnconnectedUnknownParameterNodes) {
+	if (bCreateUnknownNodes) {
+		if (UnknownTextureCount > MaxUnknownTextureNodes) {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("[MaterialApproximation] Truncated unknown texture params (%d -> %d) for material '%s'."),
+				UnknownTextureCount, MaxUnknownTextureNodes, *Model.MaterialName);
+		}
+		if (UnknownScalarCount > MaxUnknownScalarNodes) {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("[MaterialApproximation] Truncated unknown scalar params (%d -> %d) for material '%s'."),
+				UnknownScalarCount, MaxUnknownScalarNodes, *Model.MaterialName);
+		}
+		if (UnknownVectorCount > MaxUnknownVectorNodes) {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("[MaterialApproximation] Truncated unknown vector params (%d -> %d) for material '%s'."),
+				UnknownVectorCount, MaxUnknownVectorNodes, *Model.MaterialName);
+		}
+	}
+
+	if (bCreateUnknownNodes) {
 		Y = 320;
 		for (const FApproxStaticSwitchParam& StaticSwitch : Model.StaticSwitches) {
 			FApproxScalarParam ScalarProxy;
@@ -836,6 +1155,11 @@ bool GenerateGraph(UMaterial* Material, const FApproxMaterialModel& Model)
 	UMaterialExpression* BaseColorOutput = nullptr;
 	if (const FApproxTextureParam* BaseColor = FindTexture(Model, { EApproxTextureRole::BaseColor })) {
 		BaseColorOutput = TextureNodes.FindRef(BaseColor->ParameterName);
+	}
+	else if (const FApproxTextureParam* FallbackBaseColor = FindFallbackBaseColorTexture(Model)) {
+		BaseColorOutput = TextureNodes.FindRef(FallbackBaseColor->ParameterName);
+		UE_LOG(LogJsonAsAsset, Verbose, TEXT("[MaterialApproximation] Using fallback base color texture param='%s' role=%d"),
+			*FallbackBaseColor->ParameterName.ToString(), static_cast<int32>(FallbackBaseColor->Role));
 	}
 
 	if (const FApproxVectorParam* Tint = FindVector(Model, { EApproxVectorRole::TintColor })) {
@@ -994,9 +1318,8 @@ EApproxTextureRole FMaterialApproximation::ClassifyTextureRole(const FString& Na
 		HasToken(Tokens, { TEXT("alpha") })) {
 		return EApproxTextureRole::OpacityMask;
 	}
-	if (HasAny(Normalized, { TEXT("orm"), TEXT("arm"), TEXT("occlusionroughnessmetallic"), TEXT("occlusionroughnessmetallicmask"),
-		TEXT("specularmask"), TEXT("specularmasks"), TEXT("packed"), TEXT("packedmask") }) ||
-		HasToken(Tokens, { TEXT("mask") })) {
+	if (HasAny(Normalized, { TEXT("orm"), TEXT("arm"), TEXT("aorm"), TEXT("occlusionroughnessmetallic"), TEXT("occlusionroughnessmetallicmask"),
+		TEXT("aormmask"), TEXT("armmask"), TEXT("ormmask"), TEXT("specularmask"), TEXT("specularmasks"), TEXT("packed"), TEXT("packedmask") })) {
 		return EApproxTextureRole::ORM;
 	}
 	if (HasAny(Normalized, { TEXT("basecolor"), TEXT("basecolour"), TEXT("albedo"), TEXT("diffuse"), TEXT("colour"), TEXT("color") }) ||
@@ -1074,25 +1397,27 @@ EApproxVectorRole FMaterialApproximation::ClassifyVectorRole(const FString& Name
 
 FString FMaterialApproximation::NormalizeObjectPath(const FString& ObjectPath)
 {
-	FString Path = ObjectPath.TrimStartAndEnd().Replace(TEXT("\\"), TEXT("/"));
+	FString Path = StripClassWrapperFromPath(ObjectPath).Replace(TEXT("\\"), TEXT("/"));
 
 	if (Path.IsEmpty() || Path == TEXT("None")) {
 		return FString();
 	}
 
-	if (Path.StartsWith(TEXT("Texture2D'")) || Path.StartsWith(TEXT("Material'")) || Path.StartsWith(TEXT("MaterialInstanceConstant'"))) {
-		Path.Split(TEXT("'"), nullptr, &Path, ESearchCase::IgnoreCase, ESearchDir::FromStart);
-		Path.Split(TEXT("'"), &Path, nullptr, ESearchCase::IgnoreCase, ESearchDir::FromStart);
+	if (Path.Contains(TEXT(":"))) {
+		Path.Split(TEXT(":"), &Path, nullptr, ESearchCase::IgnoreCase, ESearchDir::FromStart);
+	}
+
+	if (Path.Contains(TEXT("/Content/"))) {
+		Path.Split(TEXT("/Content/"), nullptr, &Path, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		Path = TEXT("/Game/") + Path;
+	}
+	else if (Path.StartsWith(TEXT("Content/"), ESearchCase::IgnoreCase)) {
+		Path.RightChopInline(8, EAllowShrinking::No);
+		Path = TEXT("/Game/") + Path;
 	}
 
 	if (!Path.StartsWith(TEXT("/"))) {
-		if (Path.Contains(TEXT("/Content/"))) {
-			Path.Split(TEXT("/Content/"), nullptr, &Path, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
-			Path = TEXT("/Game/") + Path;
-		}
-		else {
-			Path = TEXT("/") + Path;
-		}
+		Path = TEXT("/") + Path;
 	}
 
 	FString PackagePath = Path;

@@ -46,6 +46,7 @@ public class JsonAsAsset : ModuleRules {
 			"InputCore",
 			"ToolMenus",
 			"CoreUObject",
+			"AssetRegistry",
 			"Engine",
 			"Slate",
 			"SlateCore",
