@@ -34,6 +34,7 @@ UObject* IMaterialImporter::CreateAsset(UObject* CreatedAsset) {
 
 bool IMaterialImporter::Import() {
 	UMaterial* Material = Create<UMaterial>();
+	bool bUsedApproximationGraph = false;
 
 	/* Clear any default expressions the engine adds */
 #if ENGINE_UE5
@@ -64,6 +65,7 @@ bool IMaterialImporter::Import() {
 			FallbackMode == EMaterialFallbackMode::ApproximationThenLegacyStubs;
 
 		const bool bCreatedApproximation = bAllowApproximation && FMaterialApproximation::TryApproximateMaterial(this, Props);
+		bUsedApproximationGraph = bCreatedApproximation;
 		if (!bCreatedApproximation && bAllowLegacyStubs) {
 			CreateStubs(this);
 			CreatedStubsNotification();
@@ -86,7 +88,7 @@ bool IMaterialImporter::Import() {
 	UMaterial* EditorOnlyData = Material;
 #endif
 	
-	if (!Settings->AssetSettings.Material.DisconnectRoot) {
+	if (!bUsedApproximationGraph && !Settings->AssetSettings.Material.DisconnectRoot) {
 		TArray<FString> IgnoredProperties = TArray<FString> {
 			"ParameterGroupData",
 			"ExpressionCollection",
@@ -157,8 +159,13 @@ bool IMaterialImporter::Import() {
 		}
 	}
 
-	/* Deserialize any properties */
-	GetObjectSerializer()->DeserializeObjectProperties(GetAssetData(), Material);
+	/* Deserialize any properties.
+	 * For approximation fallback graphs, skip full property deserialization because
+	 * graph-related fields in stripped JSON can override and scramble generated wiring.
+	 */
+	if (!bUsedApproximationGraph) {
+		GetObjectSerializer()->DeserializeObjectProperties(GetAssetData(), Material);
+	}
 
 #if ENGINE_UE5
 	/* Update Cached Expression Data */
