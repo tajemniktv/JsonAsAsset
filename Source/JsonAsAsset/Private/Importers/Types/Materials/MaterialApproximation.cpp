@@ -1023,7 +1023,7 @@ const FApproxVectorParam* FindVector(const FApproxMaterialModel& Model, const TA
 	return nullptr;
 }
 
-const FApproxTextureParam* FindFallbackBaseColorTexture(const FApproxMaterialModel& Model)
+const FApproxTextureParam* FindFallbackBaseColorTexture(const FApproxMaterialModel& Model, int32* OutScore = nullptr)
 {
 	const FApproxTextureParam* Candidate = nullptr;
 	int32 CandidateCount = 0;
@@ -1049,6 +1049,9 @@ const FApproxTextureParam* FindFallbackBaseColorTexture(const FApproxMaterialMod
 	}
 
 	if (CandidateCount == 1) {
+		if (OutScore) {
+			*OutScore = 1000;
+		}
 		return Candidate;
 	}
 
@@ -1105,7 +1108,10 @@ const FApproxTextureParam* FindFallbackBaseColorTexture(const FApproxMaterialMod
 		}
 	}
 
-	return BestScore > 0 ? Best : nullptr;
+	if (OutScore) {
+		*OutScore = BestScore;
+	}
+	return Best;
 }
 
 bool HasGraphInputs(const FApproxMaterialModel& Model)
@@ -1213,10 +1219,17 @@ bool GenerateGraph(UMaterial* Material, const FApproxMaterialModel& Model)
 	if (const FApproxTextureParam* BaseColor = FindTexture(Model, { EApproxTextureRole::BaseColor })) {
 		BaseColorOutput = TextureNodes.FindRef(BaseColor->ParameterName);
 	}
-	else if (const FApproxTextureParam* FallbackBaseColor = FindFallbackBaseColorTexture(Model)) {
+	else {
+		int32 FallbackScore = MIN_int32;
+		if (const FApproxTextureParam* FallbackBaseColor = FindFallbackBaseColorTexture(Model, &FallbackScore)) {
 		BaseColorOutput = TextureNodes.FindRef(FallbackBaseColor->ParameterName);
-		UE_LOG(LogJsonAsAsset, Verbose, TEXT("[MaterialApproximation] Using fallback base color texture param='%s' role=%d"),
-			*FallbackBaseColor->ParameterName.ToString(), static_cast<int32>(FallbackBaseColor->Role));
+			UE_LOG(LogJsonAsAsset, Verbose, TEXT("[MaterialApproximation] Using fallback base color texture param='%s' role=%d score=%d"),
+				*FallbackBaseColor->ParameterName.ToString(), static_cast<int32>(FallbackBaseColor->Role), FallbackScore);
+		}
+		else {
+			UE_LOG(LogJsonAsAsset, Verbose, TEXT("[MaterialApproximation] No base color texture candidate found for '%s'."),
+				*Model.MaterialName);
+		}
 	}
 
 	if (const FApproxVectorParam* Tint = FindVector(Model, { EApproxVectorRole::TintColor })) {
