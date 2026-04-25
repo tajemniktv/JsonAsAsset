@@ -33,12 +33,17 @@ void FJsonAsAssetModule::StartupModule() {
     FJsonAsAssetStyle::Initialize();
     FJsonAsAssetStyle::ReloadTextures();
 
-    /* Register Toolbar */
-	Toolbar = NewObject<UJsonAsAssetToolbar>();
-	Toolbar->AddToRoot();
+	/* Register Toolbar */
+	UJsonAsAssetToolbar* NewToolbar = NewObject<UJsonAsAssetToolbar>();
+	Toolbar = NewToolbar;
+	if (NewToolbar) {
+		NewToolbar->AddToRoot();
+	}
 	
 #if ENGINE_UE5
-	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateUObject(Toolbar, &UJsonAsAssetToolbar::Register));
+	if (NewToolbar) {
+		UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateUObject(NewToolbar, &UJsonAsAssetToolbar::Register));
+	}
 #else
 	{
     	const TSharedPtr<FUICommandList> PluginCommands = MakeShareable(new FUICommandList);
@@ -49,7 +54,7 @@ void FJsonAsAssetModule::StartupModule() {
 			"Settings",
 			EExtensionHook::After,
 			PluginCommands,
-			FToolBarExtensionDelegate::CreateUObject(Toolbar, &UJsonAsAssetToolbar::UE4Register)
+		FToolBarExtensionDelegate::CreateUObject(NewToolbar, &UJsonAsAssetToolbar::UE4Register)
 		);
 
     	LevelEditorModule.GetToolBarExtensibilityManager()->AddExtender(ToolbarExtender);
@@ -73,13 +78,10 @@ void FJsonAsAssetModule::ShutdownModule() {
 	/* Shutdown the plugin style */
 	FJsonAsAssetStyle::Shutdown();
 
-	if (Toolbar) {
-		if (IsValid(Toolbar) && Toolbar->IsRooted()) {
-			Toolbar->RemoveFromRoot();
-		}
-
-		Toolbar = nullptr;
+	if (UJsonAsAssetToolbar* LiveToolbar = Toolbar.Get()) {
+		LiveToolbar->RemoveFromRoot();
 	}
+	Toolbar = nullptr;
 }
 
 IMPLEMENT_MODULE(FJsonAsAssetModule, JsonAsAsset)
