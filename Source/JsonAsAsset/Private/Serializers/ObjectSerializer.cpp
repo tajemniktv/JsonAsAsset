@@ -2,6 +2,7 @@
 
 #include "Serializers/ObjectSerializer.h"
 
+#include "Animation/AnimNodeBase.h"
 #include "Animation/WidgetAnimation.h"
 #include "Engine/Compatibility.h"
 
@@ -13,6 +14,7 @@
 #include "Particles/ParticleEmitter.h"
 #include "Particles/ParticleLODLevel.h"
 #include "Particles/ParticleSystem.h"
+#include "Particles/TypeData/ParticleModuleTypeDataGpu.h"
 #include "Settings/Runtime.h"
 
 /* ReSharper disable once CppDeclaratorNeverUsed */
@@ -83,7 +85,7 @@ UObject* UObjectSerializer::SpawnExport(FUObjectExport* Export, const bool bOnly
 		}
 	}
 
-	if (!ObjectOuter) return nullptr;
+	if (!ObjectOuter && !Export->Object) return nullptr;
 
 	/* Default flags */
 	EObjectFlags Flags = RF_Public | RF_Transactional;
@@ -118,7 +120,7 @@ UObject* UObjectSerializer::SpawnExport(FUObjectExport* Export, const bool bOnly
 		
 		/* Initialize epic detail mode to enabled if it's an older version of the engine */
 		if (!GJsonAsAssetRuntime.IsUE5()) {
-#if ENGINE_UE5 && ENGINE_MINOR_VERSION >= 2
+#if ENGINE_UE5 && ENGINE_MINOR_VERSION >= 3
 			if (ParticleEmitter->DetailModeBitmask & 1 << EParticleDetailMode::PDM_High) {
 				ParticleEmitter->DetailModeBitmask |= 1 << EParticleDetailMode::PDM_Epic;
 			}
@@ -133,6 +135,10 @@ UObject* UObjectSerializer::SpawnExport(FUObjectExport* Export, const bool bOnly
 	if (UParticleSystem* ParticleSystem = Cast<UParticleSystem>(Export->Object)) {
 		ParticleSystem->PostEditChange();
 		ParticleSystem->SetupSoloing();
+	}
+
+	if (UParticleModule* ParticleModule = Cast<UParticleModule>(Export->Object)) {
+		ParticleModule->PostLoad();
 	}
 	
 	return Export->Object;
@@ -305,6 +311,10 @@ void UObjectSerializer::DeserializeExport(FUObjectExport* Export, TMap<TSharedPt
 void UObjectSerializer::DeserializeObjectProperties(const TSharedPtr<FJsonObject>& Properties, UObject* Object) const {
 	if (Object == nullptr) return;
 
+	if (Cast<UParticleSystem>(Object)) {
+		Object->PreEditChange(nullptr);
+	}
+
 	const UClass* ObjectClass = Object->GetClass();
 
 	for (FProperty* Property = ObjectClass->PropertyLink; Property; Property = Property->PropertyLinkNext) {
@@ -348,9 +358,19 @@ void UObjectSerializer::DeserializeObjectProperties(const TSharedPtr<FJsonObject
 		}
 	}
 	
-	if (UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(Object)) {
-		StaticMeshComponent->PostEditImport();
+	if (Cast<UStaticMeshComponent>(Object)
+		|| Cast<UParticleSystem>(Object)
+		|| Cast<UParticleLODLevel>(Object)
+		|| Cast<UParticleModule>(Object)
+		|| Cast<UParticleEmitter>(Object)) {
+		Object->PostEditImport();
 	}
+
+#if 0 /* @REVISIT: Sometimes entire modules are cooked into GPU data */
+	if (UParticleModuleTypeDataGpu* ParticleModuleTypeDataGPU = Cast<UParticleModuleTypeDataGpu>(Object)) {
+		ParticleModuleTypeDataGPU->GetOutermost()->bIsCookedForEditor = true;
+	}
+#endif
 
 	/* Volumes are not supported, yet. ;] */
 	if (UPostProcessComponent* PostProcessComponent = Cast<UPostProcessComponent>(Object)) {

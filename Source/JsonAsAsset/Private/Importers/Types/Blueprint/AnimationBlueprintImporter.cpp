@@ -23,18 +23,7 @@
 #include "UObject/UnrealTypePrivate.h"
 #endif
 
-bool GShowAnimationBlueprintImporterWarning = true;
-
 bool IAnimationBlueprintImporter::Import() {
-	const UJsonAsAssetSettings* Settings = GetSettings();
-	const bool bShowExperimentalWarning =
-		Settings != nullptr && Settings->ShowAnimationBlueprintExperimentalWarning;
-
-	if (GShowAnimationBlueprintImporterWarning && bShowExperimentalWarning) {
-		SpawnPrompt("Preface Warning", "Animation blueprint import is experimental and may not be stable for all assets.");
-		GShowAnimationBlueprintImporterWarning = false;
-	}
-	
 	AnimBlueprint = GetSelectedAsset<UAnimBlueprint>(true);
 	if (!AnimBlueprint) {
 		const TSharedPtr<FJsonObject> SuperStruct = GetAssetData()->GetObjectField(TEXT("SuperStruct"));

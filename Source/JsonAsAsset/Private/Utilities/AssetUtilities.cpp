@@ -16,6 +16,7 @@
 
 #include "HttpModule.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Engine/FontFace.h"
 #include "Importers/Constructor/ImportReader.h"
 #include "Importers/Constructor/Graph/SoundGraph.h"
 #include "Interfaces/IHttpResponse.h"

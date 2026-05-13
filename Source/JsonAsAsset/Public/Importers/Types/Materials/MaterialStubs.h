@@ -245,20 +245,10 @@ inline void CreateStubs(IMaterialImporter* MaterialImporter) {
 					param->ParameterName = FName(paramName);
 					param->MaterialExpressionEditorX = x;
 					param->MaterialExpressionEditorY = y;
-					FString TextureObjectPath = textureAssetPath;
-					if (!textureSubPath.IsEmpty()) {
-						if (!textureSubPath.StartsWith(TEXT(":"))) {
-							TextureObjectPath += TEXT(":");
-						}
-						TextureObjectPath += textureSubPath;
-					}
-
-					TObjectPtr<UTexture> tex =
-						TSoftObjectPtr<UTexture>(FSoftObjectPath(TextureObjectPath))
-							.LoadSynchronous();
+#if ENGINE_MINOR_VERSION <= 5
+					TObjectPtr<UTexture> tex = TSoftObjectPtr<UTexture>(FSoftObjectPath(FName(textureAssetPath), textureSubPath)).LoadSynchronous();
 					param->Texture = tex;
 					param->SamplerType = param->GetSamplerTypeForTexture(tex.Get());
-
 					UMaterialExpressionAdd* newAdd = NewObject<UMaterialExpressionAdd>(Material);
 					Material->GetExpressionCollection().AddExpression(newAdd);
 					newAdd->MaterialExpressionEditorX = x + 16 * 8 * 2;
@@ -270,6 +260,7 @@ inline void CreateStubs(IMaterialImporter* MaterialImporter) {
 						lastAdd->B.Connect(0, newAdd);
 					}
 					lastAdd = newAdd;
+#endif
 				}
 				y += 16*8*2;
 				i++;

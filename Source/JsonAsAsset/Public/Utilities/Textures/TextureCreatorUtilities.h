@@ -9,12 +9,13 @@ inline bool ShouldUseOctetStream(
 	const FString& Type,
 	const bool IsVectorDisplacementMap)
 {
+#if PLATFORM_LINUX
+	return false;
+#else
+	
 #if UE4_26_BELOW || UE5_5_BEYOND
 	return true;
 #else
-#if PLATFORM_LINUX
-	return false;
-#endif
 	
 	if (Type == "TextureLightProfile"
 	 || Type == "TextureCube"
@@ -25,6 +26,7 @@ inline bool ShouldUseOctetStream(
 	}
 	
 	return IsVectorDisplacementMap;
+#endif
 #endif
 }
 
