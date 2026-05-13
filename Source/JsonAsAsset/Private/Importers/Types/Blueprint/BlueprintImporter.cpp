@@ -20,6 +20,14 @@
 #include "Utilities/BlueprintUtilities.h"
 
 UObject* IBlueprintImporter::CreateAsset(UObject* CreatedAsset) {
+	UPackage* AssetPackage = GetPackage();
+	if (!AssetPackage || !IsValid(AssetPackage)) {
+		UE_LOG(LogJsonAsAsset, Error,
+		       TEXT("Blueprint CreateAsset failed: invalid package for '%s'."),
+		       *GetAssetName());
+		return nullptr;
+	}
+
 	UClass* Class = GetAssetClass();
 	
 	if (!Class) {
@@ -46,13 +54,32 @@ UObject* IBlueprintImporter::CreateAsset(UObject* CreatedAsset) {
 				GeneratedClass
 			);
 
+	if (!BlueprintClass || !GeneratedClass) {
+		UE_LOG(
+		    LogJsonAsAsset, Error,
+		    TEXT("Blueprint CreateAsset failed for '%s': blueprint classes could not be resolved (BlueprintClass=%s, GeneratedClass=%s)."),
+		    *GetAssetName(),
+		    BlueprintClass ? *BlueprintClass->GetName() : TEXT("null"),
+		    GeneratedClass ? *GeneratedClass->GetName() : TEXT("null"));
+		return nullptr;
+	}
+
 	/* Propagate blueprint defaults if it already exists */
-	if (const UBlueprint* ExistingBlueprint = LoadObject<UBlueprint>(nullptr, *GetPackage()->GetPathName())) {
+	const FString ExistingObjectPath = AssetPackage->GetPathName() + TEXT(".") + GetAssetName();
+	if (const UBlueprint* ExistingBlueprint = FindObject<UBlueprint>(nullptr, *ExistingObjectPath)) {
 		UBlueprintGeneratedClass* BlueprintGeneratedClass = Cast<UBlueprintGeneratedClass>(ExistingBlueprint->GeneratedClass);
-		FBlueprintEditorUtils::PropagateParentBlueprintDefaults(BlueprintGeneratedClass);
+		if (!BlueprintGeneratedClass) {
+			UE_LOG(
+			    LogJsonAsAsset, Warning,
+			    TEXT("Existing blueprint '%s' has no generated class; skipping default propagation."),
+			    *ExistingObjectPath);
+		} else {
+			FBlueprintEditorUtils::PropagateParentBlueprintDefaults(BlueprintGeneratedClass);
+		}
 
 		/* Return GeneratedClass instead of UBlueprint* */
-		return IImporter::CreateAsset(BlueprintGeneratedClass);
+		return IImporter::CreateAsset(BlueprintGeneratedClass ? static_cast<UObject*>(BlueprintGeneratedClass)
+		                                                     : const_cast<UBlueprint*>(ExistingBlueprint));
 	}
 
 	const UBlueprint* CreatedBlueprint = FKismetEditorUtilities::CreateBlueprint(
@@ -80,7 +107,19 @@ bool IBlueprintImporter::Import() {
 
 	/* Deserialize Generated Class (blueprint defaults) */
 	UBlueprintGeneratedClass* GeneratedClass = Cast<UBlueprintGeneratedClass>(Blueprint->GeneratedClass);
+	if (!GeneratedClass || !GeneratedClass->GetDefaultObject()) {
+		UE_LOG(LogJsonAsAsset, Error,
+		       TEXT("Blueprint import failed for '%s': generated class/default object is invalid."),
+		       *GetAssetName());
+		return false;
+	}
 	FUObjectExport* ClassDefaultObjectExport = GetClassDefaultObject(GetContainer(), GetAssetDataAsValue());
+	if (!ClassDefaultObjectExport || !ClassDefaultObjectExport->GetProperties().IsValid()) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("Blueprint import for '%s': class default export/properties missing; skipping CDO deserialize."),
+		       *GetAssetName());
+		return OnAssetCreation(Blueprint);
+	}
 	ClassDefaultObjectExport->Object = GeneratedClass;
 
 	GetObjectSerializer()->DeserializeObjectProperties(ClassDefaultObjectExport->GetProperties(), GeneratedClass->GetDefaultObject());
@@ -140,6 +179,18 @@ void IBlueprintImporter::ConstructWidgetTree() {
 	if (!GetAssetDataAsValue().Has("WidgetTree")) return;
 
 	UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint);
+	if (!WidgetBlueprint || !IsValid(WidgetBlueprint)) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("ConstructWidgetTree skipped for '%s': WidgetBlueprint is invalid."),
+		       *GetAssetName());
+		return;
+	}
+	if (!WidgetBlueprint->WidgetTree || !IsValid(WidgetBlueprint->WidgetTree)) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("ConstructWidgetTree skipped for '%s': WidgetTree is invalid."),
+		       *GetAssetName());
+		return;
+	}
 	
 	for (UWidget* Widget : Cast<UWidgetTreeAccessor>(WidgetBlueprint->WidgetTree)->GetWidgets()) {
 		MoveToTransientPackageAndRename(Widget);
@@ -154,19 +205,39 @@ void IBlueprintImporter::ConstructWidgetTree() {
 	WidgetBlueprint->Animations.Empty();
 	
 	FUObjectExport* ClassDefaultObjectExport = GetClassDefaultObject(GetContainer(), GetAssetDataAsValue());
+	if (!ClassDefaultObjectExport) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("ConstructWidgetTree for '%s': missing class default object export."),
+		       *GetAssetName());
+		return;
+	}
 	ClassDefaultObjectExport->Object = WidgetBlueprint;
 	SetAsset(WidgetBlueprint);
 
-	MoveToTransientPackageAndRename(WidgetBlueprint->WidgetTree->RootWidget);
+	if (WidgetBlueprint->WidgetTree->RootWidget) {
+		MoveToTransientPackageAndRename(WidgetBlueprint->WidgetTree->RootWidget);
+	}
 	WidgetBlueprint->WidgetTree->RootWidget = nullptr;
 
 	FUObjectExport* Export;
 
 	if (GetAssetDataAsValue().Has("TemplateAsset")) {
 		FUObjectExport* TemplateAsset = GetContainer()->GetExportByObjectPath(GetAssetDataAsValue().GetObject("TemplateAsset"));
+		if (!TemplateAsset) {
+			UE_LOG(LogJsonAsAsset, Warning,
+			       TEXT("ConstructWidgetTree for '%s': missing TemplateAsset export."),
+			       *GetAssetName());
+			return;
+		}
 		Export = GetContainer()->GetExportByObjectPath(TemplateAsset->GetPropertiesAsValue().GetObject("WidgetTree"));
 	} else {
 		Export = GetContainer()->GetExportByObjectPath(GetAssetDataAsValue().GetObject("WidgetTree"));
+	}
+	if (!Export) {
+		UE_LOG(LogJsonAsAsset, Warning,
+		       TEXT("ConstructWidgetTree for '%s': missing WidgetTree export."),
+		       *GetAssetName());
+		return;
 	}
 	
 	Export->Object = WidgetBlueprint->WidgetTree;
@@ -177,8 +248,14 @@ void IBlueprintImporter::ConstructWidgetTree() {
 	GetContainer()->ExportsLoop(GetAssetDataAsValue().GetArray("Animations"), [this, WidgetBlueprint](FUObjectExport* DirectExport) {
 		if (UObject* Object = GetObjectSerializer()->SpawnExport(DirectExport)) {
 			UWidgetAnimation* WidgetAnimation = Cast<UWidgetAnimation>(Object);
+			if (!WidgetAnimation || !IsValid(WidgetAnimation)) {
+				return;
+			}
 		
 			WidgetBlueprint->Animations.Add(WidgetAnimation);
+			if (!WidgetAnimation->MovieScene || !IsValid(WidgetAnimation->MovieScene)) {
+				return;
+			}
 
 			for (int32 Index = 0; Index < WidgetAnimation->MovieScene->GetPossessableCount(); ++Index) {
 				FMovieScenePossessable& Possessable = WidgetAnimation->MovieScene->GetPossessable(Index);
@@ -201,7 +278,10 @@ void IBlueprintImporter::ConstructWidgetTree() {
 					Track->MarkAsChanged();
 
 					if (UMovieSceneWidgetMaterialTrack* MaterialTrack = Cast<UMovieSceneWidgetMaterialTrack>(Track)) {
-						MaterialTrack->SetDisplayName(FText::FromString(MaterialTrack->GetBrushPropertyNamePath()[0].ToString()));
+						const TArray<FName>& BrushPropertyPath = MaterialTrack->GetBrushPropertyNamePath();
+						if (BrushPropertyPath.Num() > 0) {
+							MaterialTrack->SetDisplayName(FText::FromString(BrushPropertyPath[0].ToString()));
+						}
 					}
 				}
 			}
