@@ -5,6 +5,7 @@
 #include "Engine/FontFace.h"
 #include "Factories/FbxAnimSequenceImportData.h"
 #include "Engine/EngineUtilities.h"
+#include "Sound/SoundWave.h"
 
 void TToolClearImportData::Execute() {
 	TArray<FAssetData> AssetDataList = GetAssetsInSelectedFolder();
@@ -18,6 +19,9 @@ void TToolClearImportData::Execute() {
 		"SkeletalMesh",
 		"StaticMesh",
 		"Texture",
+		"Texture2D",
+		"TextureCube",
+		"SoundWave",
 		"FontFace",
 	};
 
@@ -49,6 +53,10 @@ void TToolClearImportData::Execute() {
 
 		if (UFontFace* FontFace = Cast<UFontFace>(Asset)) {
 			FontFace->SourceFilename = FString();
+		}
+
+		if (USoundWave* SoundWave = Cast<USoundWave>(Asset)) {
+			SoundWave->AssetImportData = nullptr;
 		}
 
 		if (USkeletalMesh* SkeletalMesh = Cast<USkeletalMesh>(Asset)) {

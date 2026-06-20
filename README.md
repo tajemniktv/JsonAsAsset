@@ -210,13 +210,16 @@ This is a known issue in our code that we haven't fully resolved yet. While prev
 
 Thanks go to these wonderful people:
 
+<a href="https://github.com/JsonAsAsset/JsonAsAsset/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=JsonAsAsset/JsonAsAsset" />
+</a>
+
 <!-- prettier-ignore-start -->
 <!-- markdownlint-disable -->
 <table>
   <tr>
-    <td align="center"><a href="https://github.com/Tectors"><img src="https://github.com/Tectors.png" width="100px"/><br/><sub><b>Tector</b></sub></a><br/>Creator</td>
-    <td align="center"><a href="https://github.com/GMatrixGames"><img src="https://github.com/GMatrixGames.png" width="90px"/><br/><sub><b>GMatrixGames</b></sub></a><br/>Collaborator</td>
-    <td align="center"><a href="https://github.com/zyloxmods"><img src="https://github.com/zyloxmods.png" width="80px"/><br/><sub><b>Zylox</b></sub></a><br/>Casual Maintainer</td>
+    <td align="center"><a href="https://github.com/Tectfy"><img src="https://github.com/Tectfy.png" width="150px"/><br/><sub><b>Tector</b></sub></a><br/>Creator</td>
+    <td align="center"><a href="https://github.com/GMatrixGames"><img src="https://github.com/GMatrixGames.png" width="130px"/><br/><sub><b>GMatrixGames</b></sub></a><br/>Co-Founder</td>
   </tr>
 </table>
 
@@ -225,5 +228,3 @@ Thanks go to these wonderful people:
 - Thanks to the people who contributed to [UEAssetToolkit](https://github.com/Buckminsterfullerene02/UEAssetToolkit-Fixes)! They have helped a lot.
 - Also, thanks to the people who contributed to [Advanced Locomotion System V4](https://www.fab.com/listings/ef9651a4-fb55-4866-a2d9-1b38b028f9c7)!
 - Logo uses a font by [Brylark](https://ko-fi.com/brylark), support him at his ko-fi!
-
-#### [Would you like to contribute?](https://github.com/JsonAsAsset/JsonAsAsset/blob/main/Source/README.md#key-information-for-contributors)
