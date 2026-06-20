@@ -279,9 +279,29 @@ FORCEINLINE uint32 GetTypeHash(const TArray<FString>& Array) {
 }
 
 inline bool HandleAssetCreation(UObject* Asset, UPackage* Package) {
+	if (Asset == nullptr || !IsValid(Asset)) {
+		UE_LOG(LogJsonAsAsset, Error,
+		       TEXT("HandleAssetCreation failed: Asset is null or invalid."));
+		return false;
+	}
+
+	if (Package == nullptr || !IsValid(Package)) {
+		UE_LOG(
+		    LogJsonAsAsset, Error,
+		    TEXT("HandleAssetCreation failed for '%s': Package is null or invalid."),
+		    *Asset->GetName());
+		return false;
+	}
+
 	{
 		/* User Failsafe.... */
 		const UPackage* AssetOutermostPackage = Asset->GetOutermost();
+		if (AssetOutermostPackage == nullptr) {
+			UE_LOG(LogJsonAsAsset, Error,
+			       TEXT("HandleAssetCreation failed for '%s': outermost package is null."),
+			       *Asset->GetName());
+			return false;
+		}
 		const FString PackageName = AssetOutermostPackage->GetName();
 
 		const FString Path = FPackageName::GetLongPackagePath(PackageName);
@@ -293,26 +313,27 @@ inline bool HandleAssetCreation(UObject* Asset, UPackage* Package) {
 	}
 
 	FAssetRegistryModule::AssetCreated(Asset);
-	if (!Asset->MarkPackageDirty()) return false;
-	
+	Asset->MarkPackageDirty();
 	Package->SetDirtyFlag(true);
 
 	if (UVectorFieldStatic* VectorFieldStatic = Cast<UVectorFieldStatic>(Asset)) {
 		VectorFieldStatic->InitResource();
 	}
 	
-	Asset->PostEditChange();
-	Asset->AddToRoot();
-	
-	Package->FullyLoad();
-
-	BrowseToAsset(Asset);
-
-	if (UVectorFieldStatic* VectorFieldStatic = Cast<UVectorFieldStatic>(Asset)) {
-		VectorFieldStatic->Resource = nullptr;
+	if (const UStaticMesh* StaticMesh = Cast<UStaticMesh>(Asset)) {
+		if (StaticMesh->GetNumSourceModels() <= 0 ||
+			!StaticMesh->IsMeshDescriptionValid(0) ||
+			StaticMesh->GetMeshDescription(0) == nullptr) {
+			UE_LOG(LogJsonAsAsset, Warning,
+			       TEXT("Skipping PostEditChange for '%s': static mesh source data is not fully initialized yet."),
+			       *Asset->GetName());
+			return true;
+		}
 	}
-	
-	Asset->PostLoad();
+
+	if (!Asset->HasAnyFlags(RF_ClassDefaultObject)) {
+		Asset->PostEditChange();
+	}
 	
 	return true;
 }

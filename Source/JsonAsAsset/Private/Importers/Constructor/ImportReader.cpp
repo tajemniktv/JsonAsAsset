@@ -41,11 +41,33 @@ IImporter* IImportReader::ReadExportAndImport(FUObjectExportContainer* Container
 
 	const UClass* Class = FindClassByType(Type);
 	
-	if (Class == nullptr) return nullptr;
+	if (Class == nullptr) {
+		UE_LOG(
+			LogJsonAsAsset,
+			Warning,
+			TEXT("Skipping '%s' from '%s': unresolved Unreal class for type '%s'."),
+			*Name,
+			*File,
+			*Type
+		);
+		return nullptr;
+	}
 
 	/* Check if this export can be imported */
 	const bool InheritsDataAsset = Class->IsChildOf(UDataAsset::StaticClass());
-	if (!CanImport(Type, false, Class)) return nullptr;
+	FString ImportSkipReason;
+	if (!CanImport(Type, false, Class, &ImportSkipReason)) {
+		UE_LOG(
+			LogJsonAsAsset,
+			Warning,
+			TEXT("Skipping '%s' (%s) from '%s': %s"),
+			*Name,
+			*Type,
+			*File,
+			ImportSkipReason.IsEmpty() ? TEXT("Type is not importable in the current configuration.") : *ImportSkipReason
+		);
+		return nullptr;
+	}
 
 	/* Convert from relative path to full path */
 	if (FPaths::IsRelative(File)) File = FPaths::ConvertRelativePathToFull(File);
@@ -177,7 +199,29 @@ IImporter* IImportReader::ImportReference(const FString& File) {
 	}
 	
 	TArray<TSharedPtr<FJsonValue>> DataObjects; {
-		DeserializeJSON(FilePath, DataObjects);
+		FString Content;
+		if (!FFileHelper::LoadFileToString(Content, *FilePath)) {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("Skipping '%s': unable to read JSON file."), *FilePath);
+			return nullptr;
+		}
+
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Content);
+		TSharedPtr<FJsonValue> RootValue;
+		if (!FJsonSerializer::Deserialize(Reader, RootValue) || !RootValue.IsValid()) {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("Skipping '%s': invalid JSON."), *FilePath);
+			return nullptr;
+		}
+
+		if (RootValue->Type == EJson::Array) {
+			DataObjects = RootValue->AsArray();
+		}
+		else if (RootValue->Type == EJson::Object && RootValue->AsObject().IsValid() && RootValue->AsObject()->HasField(TEXT("Type"))) {
+			DataObjects.Add(RootValue);
+		}
+		else {
+			UE_LOG(LogJsonAsAsset, Warning, TEXT("Skipping '%s': unsupported JSON root for import."), *FilePath);
+			return nullptr;
+		}
 	}
 
 	IImporter* Importer = nullptr;
